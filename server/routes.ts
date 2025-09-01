@@ -506,11 +506,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
-      // Smart storage strategy: Use memory for large files, database for small files
-      const fileId = `temp-${Date.now()}-${Math.random()
+      // IMPROVED STORAGE STRATEGY: Always try to store in database first for persistence
+      const fileId = `file-${Date.now()}-${Math.random()
         .toString(36)
         .substr(2, 9)}`;
-      const FILE_SIZE_THRESHOLD = 10 * 1024 * 1024; // 10MB threshold
+      const FILE_SIZE_THRESHOLD = 50 * 1024 * 1024; // Increased to 50MB threshold
       const isLargeFile = req.file.size > FILE_SIZE_THRESHOLD;
 
       // Create uploaded file object
@@ -520,7 +520,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         originalName: req.file.originalname,
         size: req.file.size,
         mimeType: req.file.mimetype,
-        data: isLargeFile ? null : rawData.data, // Only store small files in database
+        data: rawData.data, // Always try to store data in database first
         columnMapping: null,
         processedData: null,
         summary: {
@@ -529,31 +529,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
           uploadedAt: new Date().toISOString(),
           headers: rawData.headers,
           isLargeFile,
-          storageType: isLargeFile ? 'memory' : 'database',
+          storageType: 'database', // Default to database storage
         },
         uploadedAt: new Date(),
       };
 
-      // For large files: only store metadata in database, data in memory
-      // For small files: store everything in database for persistence
+      // Try to store in database first for better persistence across server restarts
       try {
         await storage.createUploadedFile(uploadedFile);
         console.log(
-          `💾 File metadata stored in database (${
-            isLargeFile
-              ? 'large file - data in memory only'
-              : 'small file - full data in database'
+          `💾 File stored in database successfully (${
+            isLargeFile ? 'large file' : 'small file'
           })`,
         );
-      } catch (error) {
-        if (error.message?.includes('too large')) {
+      } catch (error: any) {
+        if (
+          error?.message?.includes('too large') ||
+          error?.message?.includes('payload')
+        ) {
           console.log(
             `📁 File too large for database, using memory-only storage`,
           );
           // Fallback to memory-only for very large files
           uploadedFile.summary.storageType = 'memory-only';
+          uploadedFile.data = null; // Don't store data in database
         } else {
-          throw error; // Re-throw other errors
+          console.error('Database storage error:', error);
+          // Still continue with memory storage
+          uploadedFile.summary.storageType = 'memory-fallback';
         }
       }
 
@@ -711,28 +714,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { fileId } = req.params;
 
+      console.log(`🔍 Processing request for file: ${fileId}`);
+
       // Try to get file from memory first, then database
       let file = global.tempFileMetadata?.get(fileId);
+      let rawData = global.tempFileData?.get(fileId) || [];
 
       if (!file) {
+        console.log(
+          `📁 File ${fileId} not found in memory, checking database...`,
+        );
         // Fallback to database for smaller files
         file = await storage.getUploadedFile(fileId);
-        if (!file || !file.columnMapping) {
-          return res
-            .status(404)
-            .json({ error: 'File not found or mapping not set' });
+        if (!file) {
+          console.log(`❌ File ${fileId} not found in database either`);
+          return res.status(404).json({
+            error: 'File not found',
+            message:
+              'The uploaded file could not be found. Please re-upload your file.',
+            action: 'reupload',
+          });
         }
       }
 
       if (!file.columnMapping) {
-        return res.status(400).json({ error: 'Column mapping not set' });
+        console.log(`❌ No column mapping found for file ${fileId}`);
+        return res.status(400).json({
+          error: 'Column mapping not set',
+          message: 'Please set up column mapping before processing the data.',
+        });
       }
-
-      // Get data from memory first, then fallback to database
-      let rawData = global.tempFileData?.get(fileId) || [];
 
       // If no data in memory, get from database (works for both temp and regular files)
       if (rawData.length === 0) {
+        console.log(`📋 No data in memory for ${fileId}, checking database...`);
         rawData = file.data || [];
         console.log(
           `📋 Retrieved ${rawData.length} records from database for file ${fileId}`,
@@ -744,6 +759,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
             global.tempFileData = new Map();
           }
           global.tempFileData.set(fileId, rawData);
+          console.log(
+            `💾 Restored ${rawData.length} records to memory for file ${fileId}`,
+          );
         }
       }
 
@@ -754,21 +772,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       if (rawData.length === 0) {
         console.log(`⚠️ No data found for file ${fileId}`);
-        const storageType = file.summary?.storageType || 'unknown';
-        let errorMessage =
-          'Your uploaded file data is no longer available. Please re-upload your file and process it immediately.';
 
-        if (storageType === 'memory' || storageType === 'memory-only') {
-          errorMessage =
-            'Your large file data was stored in memory and is no longer available due to server restart. For large files (>10MB), please re-upload and process immediately after upload to avoid this issue.';
+        // Check if this is a temp file that was stored in memory only
+        if (fileId.startsWith('temp-')) {
+          return res.status(410).json({
+            error: 'File session expired',
+            message:
+              'Your uploaded file data is no longer available due to server restart. This happens with temporary files when the server restarts. Please re-upload your file and process it immediately.',
+            action: 'reupload',
+            storageType: 'temporary',
+          });
+        } else {
+          return res.status(410).json({
+            error: 'File data not available',
+            message:
+              'Your uploaded file data is no longer available. Please re-upload your file and process it immediately.',
+            action: 'reupload',
+            storageType: 'database',
+          });
         }
-
-        return res.status(410).json({
-          error: 'File data not available',
-          message: errorMessage,
-          action: 'reupload',
-          storageType,
-        });
       }
 
       // ENHANCED DEBUG: Check unique pickup warehouses in raw data BEFORE filtering
