@@ -1,0 +1,14 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1763384085459,
+      "tag": "0000_slow_jane_foster",
+      "breakpoints": true,
+      "appliedAt": "2024-11-17T18:24:00.000Z"
+    }
+  ]
+}

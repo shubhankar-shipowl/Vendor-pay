@@ -97,8 +97,8 @@
 // fixAwbNumbers().catch(console.error);
 
 // Script to fix AWB numbers in scientific notation format
-const { drizzle } = require('drizzle-orm/node-postgres');
-const { Client } = require('pg');
+const { drizzle } = require('drizzle-orm/mysql2');
+const mysql = require('mysql2/promise');
 const { orders } = require('./shared/schema.ts');
 const { eq, like, or } = require('drizzle-orm');
 
@@ -122,12 +122,60 @@ function convertScientificToNumber(scientificStr) {
 }
 
 async function fixAwbNumbers() {
-  const client = new Client({
-    connectionString: process.env.DATABASE_URL, // use your DB connection string
-  });
+  // Support both DATABASE_URL and individual DB_* environment variables
+  let poolConfig;
+  
+  if (process.env.DATABASE_URL) {
+    const db_url = process.env.DATABASE_URL;
+    
+    // Parse MySQL connection string
+    if (db_url.startsWith('mysql://') || db_url.startsWith('mysql2://')) {
+      const url = new URL(db_url);
+      poolConfig = {
+        host: url.hostname,
+        port: parseInt(url.port || '3306', 10),
+        user: url.username,
+        password: url.password,
+        database: url.pathname.slice(1),
+        waitForConnections: true,
+        connectionLimit: 10,
+        queueLimit: 0,
+      };
+    } else {
+      try {
+        poolConfig = JSON.parse(db_url);
+      } catch {
+        poolConfig = { uri: db_url };
+      }
+    }
+  } else {
+    // Use individual environment variables
+    const host = process.env.DB_HOST;
+    const port = process.env.DB_PORT;
+    const database = process.env.DB_NAME;
+    const user = process.env.DB_USER;
+    const password = process.env.DB_PASSWORD;
 
-  await client.connect();
-  const db = drizzle(client);
+    if (!host || !database || !user || !password) {
+      throw new Error(
+        'Database configuration missing. Please set either DATABASE_URL or DB_HOST, DB_NAME, DB_USER, DB_PASSWORD environment variables.',
+      );
+    }
+
+    poolConfig = {
+      host,
+      port: port ? parseInt(port, 10) : 3306,
+      user,
+      password,
+      database,
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0,
+    };
+  }
+  
+  const pool = mysql.createPool(poolConfig);
+  const db = drizzle(pool);
 
   console.log('🔍 Finding orders with scientific notation AWB numbers...');
 
@@ -142,7 +190,7 @@ async function fixAwbNumbers() {
 
   if (problematicOrders.length === 0) {
     console.log('✅ No AWB numbers need fixing!');
-    await client.end();
+    await pool.end();
     return;
   }
 
@@ -179,7 +227,7 @@ async function fixAwbNumbers() {
   }
 
   console.log(`🎉 Successfully fixed ${fixedCount} AWB numbers!`);
-  await client.end();
+  await pool.end();
 }
 
 // Test the conversion function

@@ -3,32 +3,75 @@
  * This script adds the missing Order Account email data to existing orders
  */
 
-import pkg from 'pg';
+import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
 
-const { Client } = pkg;
 dotenv.config();
 
-const client = new Client({
-  connectionString: process.env.DATABASE_URL
-});
+// Support both DATABASE_URL and individual DB_* environment variables
+let poolConfig;
+
+if (process.env.DATABASE_URL) {
+  const db_url = process.env.DATABASE_URL;
+  
+  if (db_url.startsWith('mysql://') || db_url.startsWith('mysql2://')) {
+    const url = new URL(db_url);
+    poolConfig = {
+      host: url.hostname,
+      port: parseInt(url.port || '3306', 10),
+      user: url.username,
+      password: url.password,
+      database: url.pathname.slice(1),
+    };
+  } else {
+    try {
+      poolConfig = JSON.parse(db_url);
+    } catch {
+      poolConfig = { uri: db_url };
+    }
+  }
+} else {
+  // Use individual environment variables
+  const host = process.env.DB_HOST;
+  const port = process.env.DB_PORT;
+  const database = process.env.DB_NAME;
+  const user = process.env.DB_USER;
+  const password = process.env.DB_PASSWORD;
+
+  if (!host || !database || !user || !password) {
+    throw new Error(
+      'Database configuration missing. Please set either DATABASE_URL or DB_HOST, DB_NAME, DB_USER, DB_PASSWORD environment variables.',
+    );
+  }
+
+  poolConfig = {
+    host,
+    port: port ? parseInt(port, 10) : 3306,
+    user,
+    password,
+    database,
+  };
+}
+
+const pool = mysql.createPool(poolConfig);
 
 async function fixOrderAccountData() {
+  let connection;
   try {
-    await client.connect();
+    connection = await pool.getConnection();
     console.log('🔗 Connected to database');
 
     // Get files with data
-    const filesResult = await client.query(`
+    const [filesResult] = await connection.execute(`
       SELECT id, original_name, data, column_mapping 
       FROM uploaded_files 
       WHERE data IS NOT NULL 
       ORDER BY uploaded_at DESC
     `);
 
-    console.log(`📁 Found ${filesResult.rows.length} files with data`);
+    console.log(`📁 Found ${filesResult.length} files with data`);
 
-    for (const file of filesResult.rows) {
+    for (const file of filesResult) {
       console.log(`\n📋 Processing file: ${file.original_name}`);
       
       const data = typeof file.data === 'string' ? JSON.parse(file.data) : file.data;
@@ -66,13 +109,13 @@ async function fixOrderAccountData() {
         
         if (orderAccount && awbNo) {
           try {
-            const updateResult = await client.query(`
+            const [updateResult] = await connection.execute(`
               UPDATE orders 
-              SET order_account = $1 
-              WHERE awb_no = $2 AND file_id = $3
+              SET order_account = ? 
+              WHERE awb_no = ? AND file_id = ?
             `, [orderAccount, awbNo, file.id]);
             
-            if (updateResult.rowCount > 0) {
+            if (updateResult.affectedRows > 0) {
               updatedCount++;
             }
           } catch (error) {
@@ -85,19 +128,22 @@ async function fixOrderAccountData() {
     }
 
     // Final verification
-    const verificationResult = await client.query(`
+    const [verificationResult] = await connection.execute(`
       SELECT COUNT(*) as total_orders, COUNT(order_account) as orders_with_account 
       FROM orders
     `);
     
     console.log('\n📊 Final Results:');
-    console.log(`Total Orders: ${verificationResult.rows[0].total_orders}`);
-    console.log(`Orders with Account: ${verificationResult.rows[0].orders_with_account}`);
+    console.log(`Total Orders: ${verificationResult[0].total_orders}`);
+    console.log(`Orders with Account: ${verificationResult[0].orders_with_account}`);
 
   } catch (error) {
     console.error('❌ Error:', error);
   } finally {
-    await client.end();
+    if (connection) {
+      connection.release();
+    }
+    await pool.end();
     console.log('🔐 Database connection closed');
   }
 }
