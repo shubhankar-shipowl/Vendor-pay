@@ -506,11 +506,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
-      // IMPROVED STORAGE STRATEGY: Always try to store in database first for persistence
+      // OPTIMIZED STORAGE: For large files, don't store data in database to speed up upload
       const fileId = `file-${Date.now()}-${Math.random()
         .toString(36)
         .substr(2, 9)}`;
-      const FILE_SIZE_THRESHOLD = 50 * 1024 * 1024; // Increased to 50MB threshold
+      const FILE_SIZE_THRESHOLD = 10 * 1024 * 1024; // 10MB threshold - store in DB only for small files
       const isLargeFile = req.file.size > FILE_SIZE_THRESHOLD;
 
       // Create uploaded file object
@@ -520,7 +520,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         originalName: req.file.originalname,
         size: req.file.size,
         mimeType: req.file.mimetype,
-        data: rawData.data, // Always try to store data in database first
+        data: isLargeFile ? null : rawData.data, // Don't store large files in DB
         columnMapping: null,
         processedData: null,
         summary: {
@@ -529,35 +529,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
           uploadedAt: new Date().toISOString(),
           headers: rawData.headers,
           isLargeFile,
-          storageType: 'database', // Default to database storage
+          storageType: isLargeFile ? 'memory-only' : 'database',
         },
         uploadedAt: new Date(),
       };
 
-      // Try to store in database first for better persistence across server restarts
+      // Store file metadata in database (without data for large files)
       try {
         await storage.createUploadedFile(uploadedFile);
         console.log(
-          `💾 File stored in database successfully (${
-            isLargeFile ? 'large file' : 'small file'
+          `💾 File metadata stored in database (${
+            isLargeFile ? 'large file - data in memory only' : 'small file - data in database'
           })`,
         );
       } catch (error: any) {
-        if (
-          error?.message?.includes('too large') ||
-          error?.message?.includes('payload')
-        ) {
-          console.log(
-            `📁 File too large for database, using memory-only storage`,
-          );
-          // Fallback to memory-only for very large files
-          uploadedFile.summary.storageType = 'memory-only';
-          uploadedFile.data = null; // Don't store data in database
-        } else {
-          console.error('Database storage error:', error);
-          // Still continue with memory storage
-          uploadedFile.summary.storageType = 'memory-fallback';
-        }
+        console.error('Database storage error:', error);
+        uploadedFile.summary.storageType = 'memory-fallback';
       }
 
       // Always keep in memory for immediate access
@@ -793,51 +780,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
 
-      // ENHANCED DEBUG: Check unique pickup warehouses in raw data BEFORE filtering
-      const mapping = file.columnMapping;
-      const uniquePickupWarehouses = new Set();
-      const warehouseFrequency = new Map();
-
-      console.log(`🔍 DEBUG MODE ENABLED - Column Mapping Analysis:`);
-      console.log(`📋 Supplier Name Column: "${mapping.supplierName}"`);
-      console.log(`📋 Product Name Column: "${mapping.productName}"`);
-      console.log(`📋 Status Column: "${mapping.status}"`);
-
-      rawData.forEach((row, index) => {
-        const supplierValue = row[mapping.supplierName];
-        if (supplierValue) {
-          uniquePickupWarehouses.add(supplierValue);
-          warehouseFrequency.set(
-            supplierValue,
-            (warehouseFrequency.get(supplierValue) || 0) + 1,
-          );
-        }
-
-        // Show first 5 rows for debugging
-        if (index < 5) {
-          console.log(`🔍 Row ${index + 1} Debug:`, {
-            supplier: supplierValue,
-            product: row[mapping.productName],
-            status: row[mapping.status],
-            awb: row[mapping.awbNo],
-          });
-        }
-      });
-
-      console.log(
-        `🏪 TOTAL Unique pickup warehouses in raw data: ${uniquePickupWarehouses.size}`,
-      );
-      console.log(
-        `📦 All pickup warehouses:`,
-        Array.from(uniquePickupWarehouses),
-      );
-
-      // Show frequency distribution
-      const sortedFrequency = Array.from(warehouseFrequency.entries())
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 10);
-      console.log(`📊 Top 10 warehouse frequency:`, sortedFrequency);
-
+      // Optimized: Skip debug logging for large files to improve performance
       const normalizedData = normalizeData(rawData, file.columnMapping);
 
       // Separate cancelled orders
@@ -866,21 +809,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         `✅ Suppliers created. Processing ${validOrders.length} orders in batches...`,
       );
 
-      // After filtering debug
-      console.log(
-        `📊 After filtering: ${validOrders.length} valid orders, ${cancelledOrders.length} cancelled`,
-      );
-      console.log(
-        `🔍 Normalized data supplier distribution:`,
-        validOrders.reduce((acc, order) => {
-          acc[order.supplierName] = (acc[order.supplierName] || 0) + 1;
-          return acc;
-        }, {}),
-      );
-
-      // Initialize progress tracking
+      // Initialize progress tracking IMMEDIATELY before processing starts
       global.processingProgress = global.processingProgress || new Map();
-      const totalBatches = Math.ceil(validOrders.length / 1000);
+      const totalBatches = Math.ceil(validOrders.length / 2000); // Match background batch size
       global.processingProgress.set(fileId, {
         status: 'processing',
         currentBatch: 0,
@@ -888,128 +819,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
         totalRecords: validOrders.length,
         processedRecords: 0,
         percentage: 0,
-        message: 'Starting data processing...',
+        message: 'Initializing batch processing...',
       });
-
-      // Process in smaller batches to avoid stack overflow
-      const BATCH_SIZE = 1000;
-      const createdOrders = [];
-
-      for (let i = 0; i < validOrders.length; i += BATCH_SIZE) {
-        const batch = validOrders.slice(i, i + BATCH_SIZE);
-        const batchNum = Math.floor(i / BATCH_SIZE) + 1;
-
-        // Update progress
-        global.processingProgress.set(fileId, {
-          status: 'processing',
-          currentBatch: batchNum,
-          totalBatches,
-          totalRecords: validOrders.length,
-          processedRecords: i,
-          percentage: Math.round((i / validOrders.length) * 100),
-          message: `Processing batch ${batchNum} of ${totalBatches}...`,
-        });
-
-        // Fast batch preparation using map instead of loop
-        const ordersToCreate = batch.map((row) => ({
-          awbNo: row.awbNo,
-          supplierId: supplierMap.get(row.supplierName)!.id,
-          productName: row.productName,
-          courier: row.courier,
-          qty: parseInt(row.qty || '1'),
-          currency: row.currency || 'INR',
-          status: row.status,
-          orderAccount: row.orderAccount, // Extract order account from the uploaded data
-          channelOrderDate: row.channelOrderDate
-            ? new Date(row.channelOrderDate)
-            : null,
-          orderDate: row.orderDate ? new Date(row.orderDate) : null,
-          deliveredDate: row.deliveredDate ? new Date(row.deliveredDate) : null,
-          rtsDate: row.rtsDate ? new Date(row.rtsDate) : null,
-          fileId: fileId.startsWith('temp-') ? null : fileId,
-          unitPrice: null,
-          lineAmount: null,
-          hsn: null,
-          previousStatus: null,
-        }));
-
-        try {
-          const batchResults = await storage.createOrders(ordersToCreate);
-          createdOrders.push(...batchResults);
-          console.log(
-            `⚡ Batch ${batchNum}/${totalBatches} - ${batchResults.length} orders saved`,
-          );
-        } catch (error) {
-          console.error(
-            `❌ Error in batch ${Math.floor(i / BATCH_SIZE) + 1}:`,
-            error,
-          );
-        }
-      }
-
-      // Mark processing as complete
-      if (!global.processingProgress) {
-        global.processingProgress = new Map();
-      }
-      global.processingProgress.set(fileId, {
-        status: 'completed',
-        currentBatch: totalBatches,
-        totalBatches,
-        totalRecords: validOrders.length,
-        processedRecords: validOrders.length,
-        percentage: 100,
-        message: `Processing complete! ${createdOrders.length} orders created.`,
-      });
-
-      console.log(
-        `🎉 Processing complete! Total orders created: ${createdOrders.length}`,
-      );
-
-      // Generate summary
-      const summary = {
-        totalRecords: rawData.length,
-        validOrders: validOrders.length,
-        cancelledOrders: cancelledOrders.length,
-        deliveredOrders: validOrders.filter(
-          (row) => row.status?.toLowerCase() === 'delivered',
-        ).length,
-        uniqueSuppliers: supplierMap.size,
-        ordersCreated: createdOrders.length,
-        processingDate: new Date().toISOString(),
-      };
-
-      // Update file with processed data and summary
-      await storage.updateUploadedFile(fileId, {
-        processedData: null, // Don't store large data
-        summary,
-      });
-
-      // Clear temporary data after processing (but keep database record for reference)
-      global.tempFileData?.delete(fileId);
-
-      // For temp files, schedule cleanup after 1 hour
-      if (fileId.startsWith('temp-')) {
-        setTimeout(async () => {
-          try {
-            console.log(`🧹 Cleaning up temporary file: ${fileId}`);
-            await storage.deleteUploadedFile(fileId);
-          } catch (error) {
-            console.error('Error cleaning up temp file:', error);
-          }
-        }, 60 * 60 * 1000); // 1 hour
-      }
-
-      // Clean up progress after a delay to allow frontend to fetch final status
-      setTimeout(() => {
-        global.processingProgress?.delete(fileId);
-      }, 10000);
-
+      
+      // Return response immediately and process in background
       res.json({
         success: true,
-        summary,
-        cancelledOrders,
-        orderIds: createdOrders.map((o) => o.id),
+        message: 'Processing started',
+        fileId,
+        totalRecords: validOrders.length,
+        totalBatches,
       });
+
+      // Process in background (don't await) - fire and forget
+      processOrdersInBackground(fileId, validOrders, supplierMap, cancelledOrders, rawData.length, file).catch((error) => {
+        console.error('Background processing error:', error);
+      });
+      
+      return; // Exit early, processing continues in background
     } catch (error) {
       console.error('Data processing error:', error);
 
@@ -1036,6 +863,145 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     }
   });
+
+  // Background processing function
+  async function processOrdersInBackground(
+    fileId: string,
+    validOrders: any[],
+    supplierMap: Map<string, any>,
+    cancelledOrders: any[],
+    totalRawRecords: number,
+    file: any
+  ) {
+    try {
+      const BATCH_SIZE = 2000; // Increased batch size for better performance
+      const createdOrders = [];
+      const totalBatches = Math.ceil(validOrders.length / BATCH_SIZE);
+
+      for (let i = 0; i < validOrders.length; i += BATCH_SIZE) {
+        const batch = validOrders.slice(i, i + BATCH_SIZE);
+        const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+
+        // Update progress
+        global.processingProgress?.set(fileId, {
+          status: 'processing',
+          currentBatch: batchNum,
+          totalBatches,
+          totalRecords: validOrders.length,
+          processedRecords: i,
+          percentage: Math.round((i / validOrders.length) * 100),
+          message: `Processing batch ${batchNum} of ${totalBatches}...`,
+        });
+
+        // Fast batch preparation using map instead of loop
+        const ordersToCreate = batch.map((row) => ({
+          awbNo: row.awbNo,
+          supplierId: supplierMap.get(row.supplierName)!.id,
+          productName: row.productName,
+          courier: row.courier,
+          qty: parseInt(row.qty || '1'),
+          currency: row.currency || 'INR',
+          status: row.status,
+          orderAccount: row.orderAccount,
+          channelOrderDate: row.channelOrderDate
+            ? new Date(row.channelOrderDate)
+            : null,
+          orderDate: row.orderDate ? new Date(row.orderDate) : null,
+          deliveredDate: row.deliveredDate ? new Date(row.deliveredDate) : null,
+          rtsDate: row.rtsDate ? new Date(row.rtsDate) : null,
+          fileId: fileId.startsWith('temp-') ? null : fileId,
+          unitPrice: null,
+          lineAmount: null,
+          hsn: null,
+          previousStatus: null,
+        }));
+
+        try {
+          const batchResults = await storage.createOrders(ordersToCreate);
+          createdOrders.push(...batchResults);
+          console.log(
+            `⚡ Batch ${batchNum}/${totalBatches} - ${batchResults.length} orders saved`,
+          );
+        } catch (error) {
+          console.error(
+            `❌ Error in batch ${batchNum}:`,
+            error,
+          );
+        }
+      }
+
+      // Mark processing as complete
+      if (!global.processingProgress) {
+        global.processingProgress = new Map();
+      }
+      global.processingProgress.set(fileId, {
+        status: 'completed',
+        currentBatch: totalBatches,
+        totalBatches,
+        totalRecords: validOrders.length,
+        processedRecords: validOrders.length,
+        percentage: 100,
+        message: `Processing complete! ${createdOrders.length} orders created.`,
+      });
+
+      console.log(
+        `🎉 Processing complete! Total orders created: ${createdOrders.length}`,
+      );
+
+      // Generate summary
+      const summary = {
+        totalRecords: totalRawRecords,
+        validOrders: validOrders.length,
+        cancelledOrders: cancelledOrders.length,
+        deliveredOrders: validOrders.filter(
+          (row) => row.status?.toLowerCase() === 'delivered',
+        ).length,
+        uniqueSuppliers: supplierMap.size,
+        ordersCreated: createdOrders.length,
+        processingDate: new Date().toISOString(),
+      };
+
+      // Update file with processed data and summary
+      await storage.updateUploadedFile(fileId, {
+        processedData: null,
+        summary,
+      });
+
+      // Clear temporary data after processing
+      global.tempFileData?.delete(fileId);
+
+      // For temp files, schedule cleanup after 1 hour
+      if (fileId.startsWith('temp-')) {
+        setTimeout(async () => {
+          try {
+            console.log(`🧹 Cleaning up temporary file: ${fileId}`);
+            await storage.deleteUploadedFile(fileId);
+          } catch (error) {
+            console.error('Error cleaning up temp file:', error);
+          }
+        }, 60 * 60 * 1000);
+      }
+
+      // Clean up progress after a delay
+      setTimeout(() => {
+        global.processingProgress?.delete(fileId);
+      }, 30000); // 30 seconds instead of 10
+    } catch (error) {
+      console.error('Background processing error:', error);
+      global.processingProgress?.set(fileId, {
+        status: 'error',
+        currentBatch: 0,
+        totalBatches: 0,
+        totalRecords: 0,
+        processedRecords: 0,
+        percentage: 0,
+        message: 'Processing failed due to an error',
+        errorMessage:
+          error instanceof Error ? error.message : 'Unknown error occurred',
+      });
+    }
+  }
+
 
   // Price/HSN endpoints
   app.get('/api/price-entries', async (req, res) => {
@@ -1231,8 +1197,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
           });
         }
 
-        // Get all suppliers for reference
+        // OPTIMIZED: Load all data ONCE before processing
         const allSuppliers = await storage.getAllSuppliers();
+        const allPriceEntries = await storage.getAllPriceEntries();
+        
+        // Create Maps for O(1) lookups instead of O(n) array.find()
+        const supplierMap = new Map<string, any>();
+        allSuppliers.forEach(s => supplierMap.set(s.name, s));
+        
+        const priceEntryMap = new Map<string, any>();
+        allPriceEntries.forEach(p => {
+          const key = `${p.supplierId}-${p.productName}`;
+          priceEntryMap.set(key, p);
+        });
 
         // Expected format for price list:
         // Supplier Name, Product Name, Price Before GST (INR), GST Rate (%), Price After GST (INR), HSN Code, Currency, Effective From, Effective To
@@ -1305,8 +1282,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 ? effectiveToStr
                 : null;
 
-            // Find or create supplier for this row
-            let supplier = allSuppliers.find((s) => s.name === rowSupplierName);
+            // OPTIMIZED: Use Map for O(1) lookup instead of O(n) find()
+            let supplier = supplierMap.get(rowSupplierName);
 
             if (!supplier) {
               // Create new supplier if not exists
@@ -1316,7 +1293,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 contactPhone: '',
                 orderAccount: '',
               });
-              console.log(`🆕 Created new supplier: ${rowSupplierName}`);
+              supplierMap.set(rowSupplierName, supplier); // Add to map
               allSuppliers.push(supplier); // Add to local cache
             }
 
@@ -1333,12 +1310,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
               continue;
             }
 
-            // Check if price entry already exists for this supplier-product combination
-            const existingPrices = await storage.getAllPriceEntries();
-            const existingPrice = existingPrices.find(
-              (p) =>
-                p.supplierId === supplier.id && p.productName === productName,
-            );
+            // OPTIMIZED: Use Map for O(1) lookup instead of O(n) find()
+            const priceKey = `${supplier.id}-${productName}`;
+            const existingPrice = priceEntryMap.get(priceKey);
 
             if (existingPrice) {
               // Calculate final price - use provided after GST price or calculate from before GST + rate
@@ -2102,39 +2076,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         const { headers, dataRows } = parsedData;
 
-        console.log(`📋 Headers detected:`, headers);
-        console.log(`📊 First row sample:`, dataRows[0]);
-        console.log(`📊 Second row sample:`, dataRows[1]);
-        console.log(`📊 Third row sample:`, dataRows[2]);
-
-        // Check actual column counts in data rows
-        for (let i = 0; i < Math.min(5, dataRows.length); i++) {
-          const row = Array.isArray(dataRows[i])
-            ? dataRows[i]
-            : dataRows[i]
-                .split(',')
-                .map((cell) => cell.replace(/"/g, '').trim());
-          console.log(
-            `📊 Row ${i + 1} has ${row.length} columns:`,
-            row.slice(0, 5),
-            '...',
-          );
-        }
-
-        // Expected headers: Supplier Name, Product Name, Order Count, Supplier Product ID, Price Before GST, GST Rate, Price After GST, HSN Code, Currency, Effective From, Effective To
-        const expectedHeaders = [
-          'Supplier Name',
-          'Product Name',
-          'Order Count',
-          'Supplier Product ID',
-          'Price Before GST (INR)',
-          'GST Rate (%)',
-          'Price After GST (INR)',
-          'HSN Code',
-          'Currency',
-          'Effective From (YYYY-MM-DD)',
-          'Effective To (YYYY-MM-DD)',
-        ];
+        // OPTIMIZED: Load all suppliers ONCE before processing
+        const allSuppliers = await storage.getAllSuppliers();
+        const supplierMap = new Map<string, any>();
+        allSuppliers.forEach(s => supplierMap.set(s.name, s));
 
         const results = {
           totalRows: dataRows.length,
@@ -2176,12 +2121,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
               effectiveTo,
             ] = row;
 
-            console.log(
-              `🔍 Processing row ${
-                i + 2
-              }: Supplier=${supplierName}, Product=${productName}, Price=${priceBeforeGST}, HSN=${hsn}`,
-            );
-
             // Clean and validate price - handle various Excel formats
             let cleanPrice = '';
             if (
@@ -2198,10 +2137,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
             const cleanHSN = hsn ? String(hsn).trim() : '';
 
-            console.log(
-              `🧹 Cleaned values - Original Price: "${priceBeforeGST}", Clean Price: "${cleanPrice}", HSN: "${cleanHSN}"`,
-            );
-
             // Skip if price before GST or HSN is empty - but allow "0" as valid price
             if (
               !cleanPrice ||
@@ -2209,11 +2144,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
               parseFloat(cleanPrice) < 0 ||
               isNaN(parseFloat(cleanPrice))
             ) {
-              console.log(
-                `❌ Skipping row ${
-                  i + 2
-                }: Price=${cleanPrice}, HSN=${cleanHSN}`,
-              );
               results.skipped++;
               results.errors.push(
                 `Row ${
@@ -2223,9 +2153,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
               continue;
             }
 
-            // Find supplier
-            const suppliers = await storage.getAllSuppliers();
-            const supplier = suppliers.find((s) => s.name === supplierName);
+            // OPTIMIZED: Use Map for O(1) lookup
+            const supplier = supplierMap.get(supplierName);
 
             if (!supplier) {
               results.skipped++;
@@ -2274,12 +2203,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
               effectiveTo: toDate,
             };
 
-            console.log(`💾 Creating price entry:`, priceEntryData);
             await storage.createPriceEntry(priceEntryData);
             results.processed++;
-            console.log(
-              `✅ Successfully created price entry for ${productName}`,
-            );
           } catch (rowError) {
             console.error(`❌ Error processing row ${i + 2}:`, rowError);
             results.skipped++;
@@ -2292,9 +2217,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
             );
           }
         }
-
-        console.log(`📊 Final Results:`, results);
-        console.log(`📋 All Errors:`, results.errors);
 
         res.json({
           success: true,

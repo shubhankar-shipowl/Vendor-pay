@@ -1,7 +1,8 @@
+import { randomUUID } from "crypto";
 import { type User, type InsertUser, type UploadedFile, type InsertUploadedFile, type Supplier, type InsertSupplier, type PriceEntry, type InsertPriceEntry, type Order, type InsertOrder, type ReconciliationLog, type InsertReconciliationLog } from "@shared/schema";
 import { db } from "./db";
 import { users, uploadedFiles, suppliers, priceEntries, orders, reconciliationLog } from "@shared/schema";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { IStorage } from "./storage";
 
 export class DrizzleStorage implements IStorage {
@@ -17,14 +18,26 @@ export class DrizzleStorage implements IStorage {
   }
 
   async createUser(insertUser: InsertUser): Promise<User> {
-    const result = await db.insert(users).values(insertUser).returning();
-    return result[0];
+    const id = insertUser.id ?? randomUUID();
+
+    await db.insert(users).values({ ...insertUser, id });
+
+    const created = await this.getUser(id);
+    if (!created) {
+      throw new Error("Failed to create user");
+    }
+    return created;
   }
 
   // File methods
   async createUploadedFile(file: InsertUploadedFile): Promise<UploadedFile> {
-    const result = await db.insert(uploadedFiles).values(file).returning();
-    return result[0];
+    const id = file.id ?? randomUUID();
+    await db.insert(uploadedFiles).values({ ...file, id });
+    const created = await this.getUploadedFile(id);
+    if (!created) {
+      throw new Error("Failed to create uploaded file");
+    }
+    return created;
   }
 
   async getUploadedFile(id: string): Promise<UploadedFile | undefined> {
@@ -33,8 +46,8 @@ export class DrizzleStorage implements IStorage {
   }
 
   async updateUploadedFile(id: string, updates: Partial<UploadedFile>): Promise<UploadedFile | undefined> {
-    const result = await db.update(uploadedFiles).set(updates).where(eq(uploadedFiles.id, id)).returning();
-    return result[0];
+    await db.update(uploadedFiles).set(updates).where(eq(uploadedFiles.id, id));
+    return this.getUploadedFile(id);
   }
 
   async getAllUploadedFiles(): Promise<UploadedFile[]> {
@@ -43,8 +56,13 @@ export class DrizzleStorage implements IStorage {
 
   // Supplier methods
   async createSupplier(supplier: InsertSupplier): Promise<Supplier> {
-    const result = await db.insert(suppliers).values(supplier).returning();
-    return result[0];
+    const id = supplier.id ?? randomUUID();
+    await db.insert(suppliers).values({ ...supplier, id });
+    const created = await this.getSupplier(id);
+    if (!created) {
+      throw new Error("Failed to create supplier");
+    }
+    return created;
   }
 
   async getSupplier(id: string): Promise<Supplier | undefined> {
@@ -62,25 +80,28 @@ export class DrizzleStorage implements IStorage {
   }
 
   async updateSupplierOrderAccount(id: string, orderAccount: string | null): Promise<Supplier | undefined> {
-    const result = await db.update(suppliers)
+    await db.update(suppliers)
       .set({ orderAccount })
-      .where(eq(suppliers.id, id))
-      .returning();
-    return result[0];
+      .where(eq(suppliers.id, id));
+    return this.getSupplier(id);
   }
 
   async updateSupplier(id: string, updates: Partial<Supplier>): Promise<Supplier | undefined> {
-    const result = await db.update(suppliers)
+    await db.update(suppliers)
       .set(updates)
-      .where(eq(suppliers.id, id))
-      .returning();
-    return result[0];
+      .where(eq(suppliers.id, id));
+    return this.getSupplier(id);
   }
 
   // Price entry methods
   async createPriceEntry(priceEntry: InsertPriceEntry): Promise<PriceEntry> {
-    const result = await db.insert(priceEntries).values(priceEntry).returning();
-    return result[0];
+    const id = priceEntry.id ?? randomUUID();
+    await db.insert(priceEntries).values({ ...priceEntry, id });
+    const created = await this.getPriceEntry(id);
+    if (!created) {
+      throw new Error("Failed to create price entry");
+    }
+    return created;
   }
 
   async getPriceEntry(id: string): Promise<PriceEntry | undefined> {
@@ -133,25 +154,41 @@ export class DrizzleStorage implements IStorage {
     
     console.log('Cleaned updates for Drizzle:', cleanUpdates);
     
-    const result = await db.update(priceEntries).set(cleanUpdates).where(eq(priceEntries.id, id)).returning();
-    return result[0];
+    await db.update(priceEntries).set(cleanUpdates).where(eq(priceEntries.id, id));
+    return this.getPriceEntry(id);
   }
 
   async deletePriceEntry(id: string): Promise<boolean> {
-    const result = await db.delete(priceEntries).where(eq(priceEntries.id, id)).returning();
-    return result.length > 0;
+    const result = await db.delete(priceEntries).where(eq(priceEntries.id, id));
+    const affected =
+      // @ts-expect-error drizzle mysql returns ResultSetHeader
+      (result?.rowsAffected ?? result?.affectedRows ?? 0) as number;
+    return affected > 0;
   }
 
   // Order methods
   async createOrder(order: InsertOrder): Promise<Order> {
-    const result = await db.insert(orders).values(order).returning();
-    return result[0];
+    const id = order.id ?? randomUUID();
+    await db.insert(orders).values({ ...order, id });
+    const created = await this.getOrder(id);
+    if (!created) {
+      throw new Error("Failed to create order");
+    }
+    return created;
   }
 
   async createOrders(orderList: InsertOrder[]): Promise<Order[]> {
     if (orderList.length === 0) return [];
-    const result = await db.insert(orders).values(orderList).returning();
-    return result;
+
+    const ordersWithIds = orderList.map((order) => ({
+      ...order,
+      id: order.id ?? randomUUID(),
+    }));
+
+    await db.insert(orders).values(ordersWithIds);
+
+    const ids = ordersWithIds.map((order) => order.id!);
+    return db.select().from(orders).where(inArray(orders.id, ids));
   }
 
   async getOrder(id: string): Promise<Order | undefined> {
@@ -177,14 +214,19 @@ export class DrizzleStorage implements IStorage {
   }
 
   async updateOrder(id: string, updates: Partial<Order>): Promise<Order | undefined> {
-    const result = await db.update(orders).set(updates).where(eq(orders.id, id)).returning();
-    return result[0];
+    await db.update(orders).set(updates).where(eq(orders.id, id));
+    return this.getOrder(id);
   }
 
   // Reconciliation log methods
   async createReconciliationLog(log: InsertReconciliationLog): Promise<ReconciliationLog> {
-    const result = await db.insert(reconciliationLog).values(log).returning();
-    return result[0];
+    const id = log.id ?? randomUUID();
+    await db.insert(reconciliationLog).values({ ...log, id });
+    const created = await db.select().from(reconciliationLog).where(eq(reconciliationLog.id, id));
+    if (!created[0]) {
+      throw new Error("Failed to create reconciliation log");
+    }
+    return created[0];
   }
 
   async getAllReconciliationLogs(): Promise<ReconciliationLog[]> {

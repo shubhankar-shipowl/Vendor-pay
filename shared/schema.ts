@@ -1,91 +1,91 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, decimal, timestamp, json, integer } from "drizzle-orm/pg-core";
+import { mysqlTable, varchar, decimal, datetime, json, int, text } from "drizzle-orm/mysql-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
-export const users = pgTable("users", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  username: text("username").notNull().unique(),
-  password: text("password").notNull(),
+export const users = mysqlTable("users", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`(UUID())`),
+  username: varchar("username", { length: 255 }).notNull().unique(),
+  password: varchar("password", { length: 255 }).notNull(),
 });
 
-export const uploadedFiles = pgTable("uploaded_files", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  filename: text("filename").notNull(),
-  originalName: text("original_name").notNull(),
-  size: integer("size").notNull(),
-  mimeType: text("mime_type").notNull(),
-  uploadedAt: timestamp("uploaded_at").defaultNow(),
+export const uploadedFiles = mysqlTable("uploaded_files", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`(UUID())`),
+  filename: varchar("filename", { length: 255 }).notNull(),
+  originalName: varchar("original_name", { length: 255 }).notNull(),
+  size: int("size").notNull(),
+  mimeType: varchar("mime_type", { length: 100 }).notNull(),
+  uploadedAt: datetime("uploaded_at").default(sql`CURRENT_TIMESTAMP`),
   data: json("data"), // Raw parsed data from CSV/Excel
   columnMapping: json("column_mapping"),
   processedData: json("processed_data"),
   summary: json("summary")
 });
 
-export const suppliers = pgTable("suppliers", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  name: text("name").notNull().unique(),
-  orderAccount: text("order_account"),
-  gstin: text("gstin"),
-  tradeName: text("trade_name"),
+export const suppliers = mysqlTable("suppliers", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`(UUID())`),
+  name: varchar("name", { length: 255 }).notNull().unique(),
+  orderAccount: varchar("order_account", { length: 255 }),
+  gstin: varchar("gstin", { length: 15 }),
+  tradeName: varchar("trade_name", { length: 255 }),
   address: text("address"), // Bill to address
   shipToAddress: text("ship_to_address"), 
-  placeOfSupply: text("place_of_supply"),
-  createdAt: timestamp("created_at").defaultNow()
+  placeOfSupply: varchar("place_of_supply", { length: 100 }),
+  createdAt: datetime("created_at").default(sql`CURRENT_TIMESTAMP`)
 });
 
-export const products = pgTable("products", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  name: text("name").notNull(),
-  supplierId: varchar("supplier_id").references(() => suppliers.id),
-  createdAt: timestamp("created_at").defaultNow()
+export const products = mysqlTable("products", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`(UUID())`),
+  name: varchar("name", { length: 255 }).notNull(),
+  supplierId: varchar("supplier_id", { length: 36 }).references(() => suppliers.id),
+  createdAt: datetime("created_at").default(sql`CURRENT_TIMESTAMP`)
 });
 
-export const priceEntries = pgTable("price_entries", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  supplierId: varchar("supplier_id").references(() => suppliers.id),
-  productName: text("product_name").notNull(),
-  currency: text("currency").notNull().default("INR"),
+export const priceEntries = mysqlTable("price_entries", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`(UUID())`),
+  supplierId: varchar("supplier_id", { length: 36 }).references(() => suppliers.id),
+  productName: varchar("product_name", { length: 255 }).notNull(),
+  currency: varchar("currency", { length: 10 }).notNull().default("INR"),
   price: decimal("price", { precision: 10, scale: 2 }).notNull(), // Final price (after GST)
   priceBeforeGst: decimal("price_before_gst", { precision: 10, scale: 2 }).notNull(),
   gstRate: decimal("gst_rate", { precision: 5, scale: 2 }).notNull().default("18.00"), // GST percentage
-  hsn: text("hsn").notNull(),
-  effectiveFrom: timestamp("effective_from").notNull(),
-  effectiveTo: timestamp("effective_to"),
-  createdAt: timestamp("created_at").defaultNow()
+  hsn: varchar("hsn", { length: 50 }).notNull(),
+  effectiveFrom: datetime("effective_from").notNull(),
+  effectiveTo: datetime("effective_to"),
+  createdAt: datetime("created_at").default(sql`CURRENT_TIMESTAMP`)
 });
 
-export const orders = pgTable("orders", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  awbNo: text("awb_no").notNull(),
-  supplierId: varchar("supplier_id").references(() => suppliers.id),
-  productName: text("product_name").notNull(),
-  courier: text("courier"),
-  qty: integer("qty").notNull().default(1),
-  currency: text("currency").default("INR"),
-  status: text("status").notNull(),
-  orderAccount: text("order_account"),
-  channelOrderDate: timestamp("channel_order_date"),
-  orderDate: timestamp("order_date"),
-  deliveredDate: timestamp("delivered_date"),
-  rtsDate: timestamp("rts_date"),
+export const orders = mysqlTable("orders", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`(UUID())`),
+  awbNo: varchar("awb_no", { length: 50 }).notNull(),
+  supplierId: varchar("supplier_id", { length: 36 }).references(() => suppliers.id),
+  productName: varchar("product_name", { length: 255 }).notNull(),
+  courier: varchar("courier", { length: 100 }),
+  qty: int("qty").notNull().default(1),
+  currency: varchar("currency", { length: 10 }).default("INR"),
+  status: varchar("status", { length: 50 }).notNull(),
+  orderAccount: varchar("order_account", { length: 255 }),
+  channelOrderDate: datetime("channel_order_date"),
+  orderDate: datetime("order_date"),
+  deliveredDate: datetime("delivered_date"),
+  rtsDate: datetime("rts_date"),
   unitPrice: decimal("unit_price", { precision: 10, scale: 2 }),
   lineAmount: decimal("line_amount", { precision: 10, scale: 2 }),
-  hsn: text("hsn"),
-  fileId: varchar("file_id").references(() => uploadedFiles.id),
-  createdAt: timestamp("created_at").defaultNow(),
-  previousStatus: text("previous_status")
+  hsn: varchar("hsn", { length: 50 }),
+  fileId: varchar("file_id", { length: 36 }).references(() => uploadedFiles.id),
+  createdAt: datetime("created_at").default(sql`CURRENT_TIMESTAMP`),
+  previousStatus: varchar("previous_status", { length: 50 })
 });
 
-export const reconciliationLog = pgTable("reconciliation_log", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  awbNo: text("awb_no").notNull(),
-  orderId: varchar("order_id").references(() => orders.id),
-  previousStatus: text("previous_status"),
-  newStatus: text("new_status").notNull(),
+export const reconciliationLog = mysqlTable("reconciliation_log", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`(UUID())`),
+  awbNo: varchar("awb_no", { length: 50 }).notNull(),
+  orderId: varchar("order_id", { length: 36 }).references(() => orders.id),
+  previousStatus: varchar("previous_status", { length: 50 }),
+  newStatus: varchar("new_status", { length: 50 }).notNull(),
   impact: decimal("impact", { precision: 10, scale: 2 }).notNull(),
   note: text("note"),
-  timestamp: timestamp("timestamp").defaultNow()
+  timestamp: datetime("timestamp").default(sql`CURRENT_TIMESTAMP`)
 });
 
 // Insert schemas

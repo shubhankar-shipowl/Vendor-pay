@@ -55,14 +55,16 @@ export function ColumnMapping({ fileData, onMappingComplete }: ColumnMappingProp
   const processDataMutation = useMutation({
     mutationFn: async () => {
       setIsProcessing(true);
-      return await apiRequest(`/api/files/${fileData.fileId}/process`, {
+      const response = await apiRequest(`/api/files/${fileData.fileId}/process`, {
         method: 'POST',
         body: JSON.stringify({})
       });
+      // Processing started successfully - keep isProcessing true so progress component shows
+      return response;
     },
     onSuccess: (data) => {
-      // Don't immediately show success - let the progress component handle it
-      // setIsProcessing will be set to false by the progress component
+      // Processing started - keep isProcessing true, progress component will handle completion
+      // The progress component will set isProcessing to false when done
     },
     onError: (error: any) => {
       setIsProcessing(false);
