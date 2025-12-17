@@ -1,4 +1,4 @@
-import { type User, type InsertUser, type UploadedFile, type InsertUploadedFile, type Supplier, type InsertSupplier, type PriceEntry, type InsertPriceEntry, type Order, type InsertOrder, type ReconciliationLog, type InsertReconciliationLog } from "@shared/schema";
+import { type User, type InsertUser, type UploadedFile, type InsertUploadedFile, type Supplier, type InsertSupplier, type PriceEntry, type InsertPriceEntry, type Order, type InsertOrder, type ReconciliationLog, type InsertReconciliationLog, type SupplierEmail, type InsertSupplierEmail } from "@shared/schema";
 import { randomUUID } from "crypto";
 
 export interface IStorage {
@@ -42,6 +42,16 @@ export interface IStorage {
   createReconciliationLog(log: InsertReconciliationLog): Promise<ReconciliationLog>;
   getAllReconciliationLogs(): Promise<ReconciliationLog[]>;
   getReconciliationLogsByAwbNo(awbNo: string): Promise<ReconciliationLog[]>;
+  
+  // Supplier email methods
+  createSupplierEmail(email: InsertSupplierEmail): Promise<SupplierEmail>;
+  getSupplierEmail(id: string): Promise<SupplierEmail | undefined>;
+  getSupplierEmailBySupplierId(supplierId: string): Promise<SupplierEmail | undefined>;
+  getSupplierEmailBySupplierName(supplierName: string): Promise<SupplierEmail | undefined>;
+  getAllSupplierEmails(): Promise<SupplierEmail[]>;
+  updateSupplierEmail(id: string, updates: Partial<SupplierEmail>): Promise<SupplierEmail | undefined>;
+  deleteSupplierEmail(id: string): Promise<boolean>;
+  bulkUpsertSupplierEmails(emails: InsertSupplierEmail[]): Promise<SupplierEmail[]>;
 }
 
 export class MemStorage implements IStorage {
@@ -51,6 +61,7 @@ export class MemStorage implements IStorage {
   private priceEntries: Map<string, PriceEntry>;
   private orders: Map<string, Order>;
   private reconciliationLogs: Map<string, ReconciliationLog>;
+  private supplierEmails: Map<string, SupplierEmail>;
 
   constructor() {
     this.users = new Map();
@@ -59,6 +70,7 @@ export class MemStorage implements IStorage {
     this.priceEntries = new Map();
     this.orders = new Map();
     this.reconciliationLogs = new Map();
+    this.supplierEmails = new Map();
   }
 
   // User methods
@@ -253,6 +265,80 @@ export class MemStorage implements IStorage {
 
   async getReconciliationLogsByAwbNo(awbNo: string): Promise<ReconciliationLog[]> {
     return Array.from(this.reconciliationLogs.values()).filter(log => log.awbNo === awbNo);
+  }
+
+  // Supplier email methods
+  async createSupplierEmail(email: InsertSupplierEmail): Promise<SupplierEmail> {
+    const id = randomUUID();
+    const newEmail: SupplierEmail = {
+      ...email,
+      id,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.supplierEmails.set(id, newEmail);
+    return newEmail;
+  }
+
+  async getSupplierEmail(id: string): Promise<SupplierEmail | undefined> {
+    return this.supplierEmails.get(id);
+  }
+
+  async getSupplierEmailBySupplierId(supplierId: string): Promise<SupplierEmail | undefined> {
+    return Array.from(this.supplierEmails.values()).find(e => e.supplierId === supplierId);
+  }
+
+  async getSupplierEmailBySupplierName(supplierName: string): Promise<SupplierEmail | undefined> {
+    return Array.from(this.supplierEmails.values()).find(e => e.supplierName === supplierName);
+  }
+
+  async getAllSupplierEmails(): Promise<SupplierEmail[]> {
+    return Array.from(this.supplierEmails.values());
+  }
+
+  async updateSupplierEmail(id: string, updates: Partial<SupplierEmail>): Promise<SupplierEmail | undefined> {
+    const existing = this.supplierEmails.get(id);
+    if (!existing) return undefined;
+    
+    const updated = { ...existing, ...updates, updatedAt: new Date() };
+    this.supplierEmails.set(id, updated);
+    return updated;
+  }
+
+  async deleteSupplierEmail(id: string): Promise<boolean> {
+    return this.supplierEmails.delete(id);
+  }
+
+  async bulkUpsertSupplierEmails(emails: InsertSupplierEmail[]): Promise<SupplierEmail[]> {
+    const results: SupplierEmail[] = [];
+    
+    for (const emailData of emails) {
+      const supplier = Array.from(this.suppliers.values()).find(s => s.name === emailData.supplierName);
+      
+      if (!supplier) {
+        console.warn(`Supplier not found: ${emailData.supplierName}, skipping email: ${emailData.email}`);
+        continue;
+      }
+
+      const existing = Array.from(this.supplierEmails.values()).find(e => e.supplierId === supplier.id);
+      
+      if (existing) {
+        const updated = await this.updateSupplierEmail(existing.id, {
+          email: emailData.email,
+          supplierName: emailData.supplierName,
+        });
+        if (updated) results.push(updated);
+      } else {
+        const created = await this.createSupplierEmail({
+          supplierId: supplier.id,
+          email: emailData.email,
+          supplierName: emailData.supplierName,
+        });
+        results.push(created);
+      }
+    }
+
+    return results;
   }
 }
 

@@ -1,8 +1,8 @@
 import { randomUUID } from "crypto";
-import { type User, type InsertUser, type UploadedFile, type InsertUploadedFile, type Supplier, type InsertSupplier, type PriceEntry, type InsertPriceEntry, type Order, type InsertOrder, type ReconciliationLog, type InsertReconciliationLog } from "@shared/schema";
+import { type User, type InsertUser, type UploadedFile, type InsertUploadedFile, type Supplier, type InsertSupplier, type PriceEntry, type InsertPriceEntry, type Order, type InsertOrder, type ReconciliationLog, type InsertReconciliationLog, type SupplierEmail, type InsertSupplierEmail } from "@shared/schema";
 import { db } from "./db";
-import { users, uploadedFiles, suppliers, priceEntries, orders, reconciliationLog } from "@shared/schema";
-import { eq, inArray } from "drizzle-orm";
+import { users, uploadedFiles, suppliers, priceEntries, orders, reconciliationLog, supplierEmails } from "@shared/schema";
+import { eq, inArray, or } from "drizzle-orm";
 import { IStorage } from "./storage";
 
 export class DrizzleStorage implements IStorage {
@@ -235,5 +235,95 @@ export class DrizzleStorage implements IStorage {
 
   async getReconciliationLogsByAwbNo(awbNo: string): Promise<ReconciliationLog[]> {
     return await db.select().from(reconciliationLog).where(eq(reconciliationLog.awbNo, awbNo));
+  }
+
+  // Supplier email methods
+  async createSupplierEmail(email: InsertSupplierEmail): Promise<SupplierEmail> {
+    const id = email.id ?? randomUUID();
+    await db.insert(supplierEmails).values({ ...email, id });
+    const created = await this.getSupplierEmail(id);
+    if (!created) {
+      throw new Error("Failed to create supplier email");
+    }
+    return created;
+  }
+
+  async getSupplierEmail(id: string): Promise<SupplierEmail | undefined> {
+    const result = await db.select().from(supplierEmails).where(eq(supplierEmails.id, id));
+    return result[0];
+  }
+
+  async getSupplierEmailBySupplierId(supplierId: string): Promise<SupplierEmail | undefined> {
+    const result = await db.select().from(supplierEmails).where(eq(supplierEmails.supplierId, supplierId));
+    return result[0];
+  }
+
+  async getSupplierEmailBySupplierName(supplierName: string): Promise<SupplierEmail | undefined> {
+    const result = await db.select().from(supplierEmails).where(eq(supplierEmails.supplierName, supplierName));
+    return result[0];
+  }
+
+  async getAllSupplierEmails(): Promise<SupplierEmail[]> {
+    return await db.select().from(supplierEmails);
+  }
+
+  async updateSupplierEmail(id: string, updates: Partial<SupplierEmail>): Promise<SupplierEmail | undefined> {
+    await db.update(supplierEmails).set(updates).where(eq(supplierEmails.id, id));
+    return this.getSupplierEmail(id);
+  }
+
+  async deleteSupplierEmail(id: string): Promise<boolean> {
+    const result = await db.delete(supplierEmails).where(eq(supplierEmails.id, id));
+    const affected =
+      // @ts-expect-error drizzle mysql returns ResultSetHeader
+      (result?.rowsAffected ?? result?.affectedRows ?? 0) as number;
+    return affected > 0;
+  }
+
+  async bulkUpsertSupplierEmails(emails: InsertSupplierEmail[]): Promise<SupplierEmail[]> {
+    if (emails.length === 0) return [];
+
+    const allSuppliers = await this.getAllSuppliers();
+    // Use case-insensitive matching by storing both original and lowercase keys
+    const supplierMap = new Map<string, typeof allSuppliers[0]>();
+    allSuppliers.forEach(s => {
+      supplierMap.set(s.name.toLowerCase(), s);
+      supplierMap.set(s.name, s); // Also store original case for exact matches
+    });
+
+    const results: SupplierEmail[] = [];
+
+    for (const emailData of emails) {
+      // Find supplier by name (try both lowercase and original case)
+      const supplier = supplierMap.get(emailData.supplierName.toLowerCase()) || 
+                       supplierMap.get(emailData.supplierName);
+      
+      if (!supplier) {
+        console.warn(`Supplier not found: ${emailData.supplierName}, skipping email: ${emailData.email}`);
+        continue;
+      }
+
+      // Check if email already exists for this supplier
+      const existing = await this.getSupplierEmailBySupplierId(supplier.id);
+      
+      if (existing) {
+        // Update existing email
+        const updated = await this.updateSupplierEmail(existing.id, {
+          email: emailData.email,
+          supplierName: emailData.supplierName,
+        });
+        if (updated) results.push(updated);
+      } else {
+        // Create new email
+        const created = await this.createSupplierEmail({
+          supplierId: supplier.id,
+          email: emailData.email,
+          supplierName: emailData.supplierName,
+        });
+        results.push(created);
+      }
+    }
+
+    return results;
   }
 }

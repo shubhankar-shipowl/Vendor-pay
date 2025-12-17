@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -7,10 +7,13 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Calendar, Download, FileText, ArrowLeft, Receipt, Building, User, Upload, Settings, ChevronDown, ChevronUp, AlertCircle, CheckCircle, Search } from "lucide-react";
+import { Calendar, Download, FileText, ArrowLeft, Receipt, Building, User, Upload, Settings, ChevronDown, ChevronUp, AlertCircle, CheckCircle, Search, Mail } from "lucide-react";
 import { Link } from 'wouter';
 import { useToast } from "@/hooks/use-toast";
 import * as XLSX from 'xlsx';
+import jsPDF from 'jspdf';
+import html2canvas from 'html2canvas';
+import { SendEmailModal } from '@/components/send-email-modal';
 
 interface InvoiceItem {
   productName: string;
@@ -69,11 +72,14 @@ export default function GSTInvoicePage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [dateType, setDateType] = useState('channelOrderDate'); // 'channelOrderDate', 'deliveredDate' or 'orderDate'
   const [showMultiSelect, setShowMultiSelect] = useState(false);
+  const [isSendEmailModalOpen, setIsSendEmailModalOpen] = useState(false);
 
   const { toast } = useToast();
 
   const { data: suppliers = [] } = useQuery({ queryKey: ['/api/suppliers'] });
   const { data: orders = [] } = useQuery({ queryKey: ['/api/orders'] });
+  const invoiceRef = useRef<HTMLDivElement | null>(null);
+  const [invoiceAttachment, setInvoiceAttachment] = useState<{ filename: string; content: string; contentType: string } | null>(null);
 
   // Load default buyer settings on page load and apply to all invoices
   React.useEffect(() => {
@@ -679,121 +685,158 @@ export default function GSTInvoicePage() {
     }
   };
 
-  const downloadInvoice = () => {
-    if (!generatedInvoice) return;
+  const downloadInvoice = async () => {
+    if (!generatedInvoice || !invoiceRef.current) return;
 
-    const invoiceHTML = `
-<!DOCTYPE html>
-<html>
-<head>
-    <title>GST Invoice - ${generatedInvoice.invoiceNumber}</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; font-size: 12px; }
-        .invoice-header { text-align: center; margin-bottom: 20px; border-bottom: 2px solid #333; padding-bottom: 10px; }
-        .invoice-details { display: flex; justify-content: space-between; margin-bottom: 20px; }
-        .party-details { width: 48%; border: 1px solid #ddd; padding: 10px; }
-        .invoice-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
-        .invoice-table th, .invoice-table td { border: 1px solid #ddd; padding: 6px; text-align: left; font-size: 11px; }
-        .invoice-table th { background-color: #f2f2f2; font-weight: bold; }
-        .totals { text-align: right; font-weight: bold; }
-        .amount { text-align: right; }
-        .gst-summary { margin-top: 20px; border: 1px solid #ddd; padding: 10px; background-color: #f8f9fa; }
-        .footer-section { margin-top: 30px; border-top: 1px solid #ddd; padding-top: 15px; }
-        .computer-generated { text-align: center; font-style: italic; color: #666; margin-top: 20px; }
-        .place-supply { margin-bottom: 10px; font-weight: bold; }
-    </style>
-</head>
-<body>
-    <div class="invoice-header">
-        <h1 style="margin: 0; color: #333;">GST INVOICE</h1>
-        <p style="margin: 5px 0;">Invoice No: <strong>${generatedInvoice.invoiceNumber}</strong></p>
-        <p style="margin: 5px 0;">Date: <strong>${new Date(generatedInvoice.invoiceDate).toLocaleDateString()}</strong></p>
-        ${generatedInvoice.placeOfSupply ? `<p class="place-supply">Place of Supply: ${generatedInvoice.placeOfSupply}</p>` : ''}
-    </div>
-    
-    <!-- Billing Details Row -->
-    <div class="invoice-details">
-        <div class="party-details">
-            <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 5px;">Supplier Details (Bill From)</h3>
-            <p><strong>${generatedInvoice.supplierTradeName || generatedInvoice.supplierName}</strong></p>
-            ${generatedInvoice.supplierAddress ? `<p style="margin: 5px 0;">${generatedInvoice.supplierAddress}</p>` : ''}
-            <p style="margin: 5px 0;"><strong>GSTIN:</strong> ${generatedInvoice.supplierGSTIN}</p>
-        </div>
-        <div class="party-details">
-            <h3 style="margin-top: 0; color: #333; border-bottom: 1px solid #ddd; padding-bottom: 5px;">Buyer Details (Bill To)</h3>
-            <p><strong>${generatedInvoice.buyerName}</strong></p>
-            ${generatedInvoice.buyerAddress ? `<p style="margin: 5px 0;">${generatedInvoice.buyerAddress}</p>` : ''}
-            <p style="margin: 5px 0;"><strong>GSTIN:</strong> ${generatedInvoice.buyerGSTIN}</p>
-        </div>
-    </div>
-    
-    
-    <table class="invoice-table">
-        <thead>
-            <tr>
-                <th>S.No</th>
-                <th>Product Name</th>
-                <th>HSN Code</th>
-                <th>Quantity</th>
-                <th>Unit Price</th>
-                <th>Amount</th>
-                <th>GST Rate</th>
-                <th>GST Amount</th>
-                <th>Total Amount</th>
-            </tr>
-        </thead>
-        <tbody>
-            ${generatedInvoice.items.map((item, index) => `
-                <tr>
-                    <td>${index + 1}</td>
-                    <td>${item.productName}</td>
-                    <td>${item.hsn}</td>
-                    <td>${item.quantity}</td>
-                    <td class="amount">₹${item.unitPrice.toFixed(2)}</td>
-                    <td class="amount">₹${item.amount.toFixed(2)}</td>
-                    <td>${item.gstRate}%</td>
-                    <td class="amount">₹${item.gstAmount.toFixed(2)}</td>
-                    <td class="amount">₹${item.totalAmount.toFixed(2)}</td>
-                </tr>
-            `).join('')}
-        </tbody>
-    </table>
-    
-    <div class="gst-summary">
-        <div class="totals">
-            <p>Total Amount (Before GST): ₹${generatedInvoice.totalAmountBeforeGST.toFixed(2)}</p>
-            <p>Total GST Amount: ₹${generatedInvoice.totalGSTAmount.toFixed(2)}</p>
-            <p><strong>Total Amount (After GST): ₹${generatedInvoice.totalAmountAfterGST.toFixed(2)}</strong></p>
-        </div>
-    </div>
-    
-    <div class="footer-section">
-        <h4 style="margin-top: 0; color: #333;">Terms & Conditions:</h4>
-        ${generatedInvoice.termsAndConditions.split('\n').map(term => `<p style="margin: 3px 0;">• ${term}</p>`).join('')}
-    </div>
-    
-    <div class="computer-generated">
-        <p style="margin: 10px 0; font-size: 11px;"><strong>This is a computer generated invoice, no signature required.</strong></p>
-        <p style="margin: 5px 0; font-size: 10px;">Generated on: ${new Date().toLocaleString()}</p>
-    </div>
-</body>
-</html>`;
+    try {
+      const pdf = await generateInvoicePdf();
+      pdf.save(`GST_Invoice_${generatedInvoice.invoiceNumber}.pdf`);
 
-    const blob = new Blob([invoiceHTML], { type: 'text/html' });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `GST_Invoice_${generatedInvoice.invoiceNumber}.html`;
-    document.body.appendChild(a);
-    a.click();
-    window.URL.revokeObjectURL(url);
-    document.body.removeChild(a);
-
-    toast({
-      title: "Invoice Downloaded",
-      description: `GST Invoice ${generatedInvoice.invoiceNumber} downloaded successfully`
-    });
+      toast({
+        title: "Invoice Downloaded",
+        description: `GST Invoice ${generatedInvoice.invoiceNumber} downloaded successfully as PDF`
+      });
+    } catch (error) {
+      console.error('PDF generation error:', error);
+      toast({
+        title: "Download Failed",
+        description: "Failed to generate PDF. Please try again.",
+        variant: "destructive"
+      });
+    }
   };
+
+  const generateInvoicePdf = async (): Promise<jsPDF> => {
+    if (!generatedInvoice || !invoiceRef.current) {
+      throw new Error('Invoice not generated');
+    }
+
+    const canvas = await html2canvas(invoiceRef.current, {
+      scale: 1, // further reduce scale to shrink PDF size
+      useCORS: true,
+      logging: false,
+    });
+
+    // Use JPEG with compression to reduce file size
+    const imgData = canvas.toDataURL('image/jpeg', 0.8);
+    const pdf = new jsPDF('p', 'pt', 'a4', true);
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+
+    const imgProps = { width: canvas.width, height: canvas.height };
+    const ratio = Math.min(pageWidth / imgProps.width, pageHeight / imgProps.height);
+    const imgWidth = imgProps.width * ratio;
+    const imgHeight = imgProps.height * ratio;
+
+    let heightLeft = imgHeight;
+    let position = 0;
+
+    pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, imgHeight, undefined, 'FAST');
+    heightLeft -= pageHeight;
+
+    while (heightLeft > 0) {
+      position = heightLeft * -1;
+      pdf.addPage();
+      pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, imgHeight, undefined, 'FAST');
+      heightLeft -= pageHeight;
+    }
+
+    return pdf;
+  };
+
+  const handleSendInvoiceEmail = async () => {
+    if (!generatedInvoice) {
+      toast({
+        title: "No Invoice",
+        description: "Generate the invoice first before sending via email.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      const pdf = await generateInvoicePdf();
+      // Generate smaller base64 by using arraybuffer then converting to base64 (no Buffer)
+      const arrayBuffer = pdf.output('arraybuffer');
+      const uint8 = new Uint8Array(arrayBuffer);
+      let binary = '';
+      for (let i = 0; i < uint8.length; i++) {
+        binary += String.fromCharCode(uint8[i]);
+      }
+      const pdfBase64 = btoa(binary);
+      setInvoiceAttachment({
+        filename: `GST_Invoice_${generatedInvoice.invoiceNumber}.pdf`,
+        content: pdfBase64,
+        contentType: 'application/pdf',
+      });
+      setIsSendEmailModalOpen(true);
+    } catch (error) {
+      console.error('PDF generation error:', error);
+      toast({
+        title: "Email Prep Failed",
+        description: "Failed to generate PDF for email. Please try again.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // Prepare email data for invoice send
+  const invoiceEmailData = useMemo(() => {
+    if (!generatedInvoice) return null;
+
+    const supplierName = generatedInvoice.supplierTradeName || generatedInvoice.supplierName;
+    // Include both trade name and legal name to improve email lookup
+    const supplierNameVariants = [
+      generatedInvoice.supplierName,
+      generatedInvoice.supplierTradeName,
+    ].filter(Boolean) as string[];
+    const items = generatedInvoice.items || [];
+    const totalQty = items.reduce((sum, i) => sum + (i.quantity || 0), 0);
+    const uniqueProducts = items.length;
+    const deliveriesCount = items.length;
+
+    // Prefer selected filter date range (dateFrom/dateTo) for the month label; fallback to invoice date
+    const fromDateString = dateFrom || generatedInvoice.invoiceDate;
+    const fromDate = new Date(fromDateString);
+    const monthLabel = fromDate.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+    const dateRange = monthLabel;
+
+    const payoutSummary = {
+      supplier: supplierName,
+      dateRange,
+      deliveriesCount,
+      totalDeliveredQty: totalQty,
+      uniqueProducts,
+      totalPreGstAmount: generatedInvoice.totalAmountBeforeGST || 0,
+      totalGstAmount: generatedInvoice.totalGSTAmount || 0,
+      totalPostGstAmount: generatedInvoice.totalAmountAfterGST || 0,
+      avgOrderValue: deliveriesCount > 0 ? (generatedInvoice.totalAmountAfterGST || 0) / deliveriesCount : 0,
+    };
+
+    // For GST Invoice emails we only need the PDF attachment, not the Excel payout export,
+    // so we intentionally keep payoutOrders empty to prevent Excel generation on the server.
+    const payoutOrders: any[] = [];
+
+    const selectedSuppliers = Array.from(new Set(supplierNameVariants));
+
+    const subject = `GST Data - ${monthLabel} - ${supplierName}`;
+    const content = `Dear ${supplierName},
+
+Please find the attached GST data for ${monthLabel}.
+
+The totals are as follows:
+
+- Total Amount (Before GST): ₹${(generatedInvoice.totalAmountBeforeGST || 0).toFixed(2)}
+- Total GST Amount: ₹${(generatedInvoice.totalGSTAmount || 0).toFixed(2)}
+- Total Amount (After GST): ₹${(generatedInvoice.totalAmountAfterGST || 0).toFixed(2)}
+
+Let me know if you require any further information.
+
+Thanks,
+Dhwani Maheshwari`;
+
+    return { payoutSummary, payoutOrders, selectedSuppliers, dateRange, subject, content };
+  }, [generatedInvoice]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-green-50">
@@ -1357,18 +1400,29 @@ export default function GSTInvoicePage() {
                   <Building className="h-6 w-6" />
                   <span>GST Invoice Preview</span>
                 </div>
-                <Button
-                  onClick={downloadInvoice}
-                  variant="outline"
-                  className="bg-white text-green-600 hover:bg-green-50"
-                >
-                  <Download className="h-4 w-4 mr-2" />
-                  Download Invoice
-                </Button>
+                <div className="flex items-center space-x-2">
+                  <Button
+                    onClick={handleSendInvoiceEmail}
+                    variant="outline"
+                    className="bg-white text-green-600 hover:bg-green-50"
+                    disabled={!generatedInvoice}
+                  >
+                    <Mail className="h-4 w-4 mr-2" />
+                    Send Mail
+                  </Button>
+                  <Button
+                    onClick={downloadInvoice}
+                    variant="outline"
+                    className="bg-white text-green-600 hover:bg-green-50"
+                  >
+                    <Download className="h-4 w-4 mr-2" />
+                    Download Invoice
+                  </Button>
+                </div>
               </CardTitle>
             </CardHeader>
             <CardContent className="p-8">
-              <div className="bg-white rounded-lg border border-gray-200 p-6">
+              <div ref={invoiceRef} className="bg-white rounded-lg border border-gray-200 p-6">
                 {/* Invoice Header */}
                 <div className="text-center mb-8">
                   <h2 className="text-2xl font-bold text-gray-900">GST INVOICE</h2>
@@ -1483,6 +1537,21 @@ export default function GSTInvoicePage() {
           </Card>
         )}
       </div>
+
+      {/* Send Email Modal for Invoice */}
+      {generatedInvoice && invoiceEmailData && (
+        <SendEmailModal
+          open={isSendEmailModalOpen}
+          onOpenChange={setIsSendEmailModalOpen}
+          payoutSummary={invoiceEmailData.payoutSummary}
+          payoutOrders={invoiceEmailData.payoutOrders}
+          selectedSuppliers={invoiceEmailData.selectedSuppliers}
+          dateRange={invoiceEmailData.dateRange}
+          initialSubject={invoiceEmailData.subject}
+          initialContent={invoiceEmailData.content}
+          attachments={invoiceAttachment ? [invoiceAttachment] : []}
+        />
+      )}
     </div>
-    );
-  }
+  );
+}

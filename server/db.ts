@@ -113,5 +113,16 @@ pool.on('error', (error) => {
   console.error('❌ Database pool error:', error.message);
 });
 
+// Graceful shutdown function to close the pool
+export async function closeDatabasePool(): Promise<void> {
+  try {
+    console.log('🔄 Closing database connection pool...');
+    await pool.end();
+    console.log('✅ Database connection pool closed successfully');
+  } catch (error: any) {
+    console.error('❌ Error closing database pool:', error.message);
+  }
+}
+
 export const db = drizzle(pool, { schema, mode: 'default' });
 console.log('✅ Drizzle ORM initialized with MySQL schema');

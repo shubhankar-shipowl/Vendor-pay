@@ -112,7 +112,7 @@ export default function DataManagement() {
                   <p className="text-sm text-yellow-700 mt-1">
                     This action will permanently delete all order records from the database. 
                     Use this when you want to upload a completely new/updated dataset.
-                    Price entries and supplier information will be preserved.
+                    Price entries, supplier information, and supplier email addresses will be preserved.
                   </p>
                 </div>
               </div>
@@ -153,6 +153,7 @@ export default function DataManagement() {
                         <ul className="text-sm text-green-600 mt-1 list-disc list-inside">
                           <li>Price entries</li>
                           <li>Supplier information</li>
+                          <li>Supplier email addresses</li>
                           <li>System settings</li>
                         </ul>
                       </div>

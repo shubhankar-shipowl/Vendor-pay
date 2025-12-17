@@ -88,6 +88,15 @@ export const reconciliationLog = mysqlTable("reconciliation_log", {
   timestamp: datetime("timestamp").default(sql`CURRENT_TIMESTAMP`)
 });
 
+export const supplierEmails = mysqlTable("supplier_emails", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`(UUID())`),
+  supplierId: varchar("supplier_id", { length: 36 }).references(() => suppliers.id),
+  email: varchar("email", { length: 255 }).notNull(),
+  supplierName: varchar("supplier_name", { length: 255 }).notNull(),
+  createdAt: datetime("created_at").default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: datetime("updated_at").default(sql`CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`)
+});
+
 // Insert schemas
 export const insertUploadedFileSchema = createInsertSchema(uploadedFiles).omit({
   id: true,
@@ -119,6 +128,12 @@ export const insertReconciliationLogSchema = createInsertSchema(reconciliationLo
   timestamp: true
 });
 
+export const insertSupplierEmailSchema = createInsertSchema(supplierEmails).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true
+});
+
 export const insertUserSchema = createInsertSchema(users).pick({
   username: true,
   password: true,
@@ -139,6 +154,8 @@ export type InsertOrder = z.infer<typeof insertOrderSchema>;
 export type Order = typeof orders.$inferSelect;
 export type InsertReconciliationLog = z.infer<typeof insertReconciliationLogSchema>;
 export type ReconciliationLog = typeof reconciliationLog.$inferSelect;
+export type InsertSupplierEmail = z.infer<typeof insertSupplierEmailSchema>;
+export type SupplierEmail = typeof supplierEmails.$inferSelect;
 
 // Additional schemas for API requests
 export const columnMappingSchema = z.object({

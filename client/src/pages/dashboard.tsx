@@ -3,13 +3,14 @@ import { useQuery } from '@tanstack/react-query';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Calendar, Download, Filter, Calculator, Truck, Package, Database, Users, FileText, TrendingUp, Upload, Receipt } from 'lucide-react';
+import { Calendar, Download, Filter, Calculator, Truck, Package, Database, Users, FileText, TrendingUp, Upload, Receipt, Mail } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Link } from 'wouter';
 import * as XLSX from 'xlsx';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiRequest } from '@/lib/queryClient';
+import { SendEmailModal } from '@/components/send-email-modal';
 
 
 
@@ -73,6 +74,8 @@ export default function Dashboard() {
   
   // Price list upload state
   const [isPriceListUploading, setIsPriceListUploading] = useState(false);
+  // Send email modal state
+  const [isSendEmailModalOpen, setIsSendEmailModalOpen] = useState(false);
   const queryClient = useQueryClient();
 
   // Get suppliers for dropdown
@@ -842,6 +845,12 @@ export default function Dashboard() {
                   <Button variant="outline" size="sm" className="flex items-center space-x-2">
                     <Calculator className="h-4 w-4" />
                     <span>Price Management</span>
+                  </Button>
+                </Link>
+                <Link href="/email-management">
+                  <Button variant="outline" size="sm" className="flex items-center space-x-2">
+                    <Mail className="h-4 w-4" />
+                    <span>Email Management</span>
                   </Button>
                 </Link>
               </div>
@@ -1630,6 +1639,13 @@ export default function Dashboard() {
             {/* Export Buttons */}
             {payoutData.payoutOrders.length > 0 && (
               <div className="flex flex-wrap gap-3 mb-8">
+                <Button 
+                  onClick={() => setIsSendEmailModalOpen(true)} 
+                  className="bg-purple-600 hover:bg-purple-700"
+                >
+                  <Mail className="h-4 w-4 mr-2" />
+                  Send Mail
+                </Button>
                 <Button onClick={() => exportPayoutData('export')} className="bg-blue-600 hover:bg-blue-700">
                   <Download className="h-4 w-4 mr-2" />
                   Export Payout Data
@@ -1772,6 +1788,18 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Send Email Modal */}
+      <SendEmailModal
+        open={isSendEmailModalOpen}
+        onOpenChange={setIsSendEmailModalOpen}
+        payoutSummary={payoutData.summary}
+        payoutOrders={payoutData.payoutOrders}
+        selectedSuppliers={appliedFilters.selectedSuppliers}
+        dateRange={appliedFilters.dateFrom && appliedFilters.dateTo 
+          ? `${appliedFilters.dateFrom} to ${appliedFilters.dateTo}` 
+          : ''}
+      />
     </div>
   );
 }

@@ -7,6 +7,7 @@ import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/dashboard";
 import DataManagement from "@/pages/data-management";
 import PriceManagement from "@/pages/price-management";
+import EmailManagement from "@/pages/email-management";
 import Reports from "@/pages/reports";
 import SupplierPerformance from "@/pages/supplier-performance";
 import SupplierInformation from "@/pages/supplier-information";
@@ -18,6 +19,7 @@ function Router() {
       <Route path="/" component={Dashboard} />
       <Route path="/data-management" component={DataManagement} />
       <Route path="/price-management" component={PriceManagement} />
+      <Route path="/email-management" component={EmailManagement} />
       <Route path="/reports" component={Reports} />
       <Route path="/supplier-performance" component={SupplierPerformance} />
       <Route path="/supplier/:supplierName" component={SupplierInformation} />
