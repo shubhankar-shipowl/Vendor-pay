@@ -2,6 +2,8 @@ import type { Express } from 'express';
 import { createServer, type Server } from 'http';
 import multer from 'multer';
 import * as XLSX from 'xlsx';
+import nodemailer from 'nodemailer';
+import { google } from 'googleapis';
 import { DrizzleStorage } from './drizzle-storage';
 import {
   columnMappingSchema,
@@ -67,8 +69,181 @@ const upload = multer({
   },
 });
 
+// Gmail API helper functions
+async function getGmailClient() {
+  const oauth2Client = new google.auth.OAuth2(
+    process.env.GMAIL_CLIENT_ID,
+    process.env.GMAIL_CLIENT_SECRET,
+    process.env.GMAIL_REDIRECT_URI
+  );
+
+  oauth2Client.setCredentials({
+    refresh_token: process.env.GMAIL_REFRESH_TOKEN,
+  });
+
+  return google.gmail({ version: 'v1', auth: oauth2Client });
+}
+
+async function getOrCreateLabel(gmail: any, labelName: string): Promise<string | null> {
+  try {
+    // List all labels
+    const response = await gmail.users.labels.list({ userId: 'me' });
+    const labels = response.data.labels || [];
+
+    // Check if label already exists
+    const existingLabel = labels.find((label: any) => label.name === labelName);
+    if (existingLabel) {
+      console.log(`✅ Label "${labelName}" already exists with ID: ${existingLabel.id}`);
+      return existingLabel.id;
+    }
+
+    // Create new label
+    const createResponse = await gmail.users.labels.create({
+      userId: 'me',
+      requestBody: {
+        name: labelName,
+        labelListVisibility: 'labelShow',
+        messageListVisibility: 'show',
+      },
+    });
+
+    console.log(`✅ Created new label "${labelName}" with ID: ${createResponse.data.id}`);
+    return createResponse.data.id || null;
+  } catch (error: any) {
+    console.error(`❌ Error getting/creating label "${labelName}":`, error.message);
+    return null;
+  }
+}
+
+async function applyLabelsToSentEmail(gmail: any, subject: string, to: string[], labels: string[]): Promise<boolean> {
+  try {
+    // Get or create all labels
+    const labelIds: string[] = [];
+    for (const labelName of labels) {
+      const labelId = await getOrCreateLabel(gmail, labelName);
+      if (labelId) {
+        labelIds.push(labelId);
+      }
+    }
+
+    if (labelIds.length === 0) {
+      console.log('⚠️ No valid labels to apply');
+      return false;
+    }
+
+    // Search for the sent email - try multiple search strategies
+    // Escape special characters in subject for Gmail search
+    const escapedSubject = subject.replace(/["\\]/g, '\\$&');
+    const searchQueries = [
+      `in:sent subject:"${escapedSubject.substring(0, 50)}"`,
+      `in:sent to:${to[0]} newer_than:1m`,
+      `in:sent from:${process.env.SMTP_USER} newer_than:1m`,
+    ];
+
+    let messageId: string | null = null;
+    
+    // Wait a bit for Gmail to index the email (sometimes there's a delay)
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Try each search query
+    for (const searchQuery of searchQueries) {
+      try {
+        const searchResponse = await gmail.users.messages.list({
+          userId: 'me',
+          q: searchQuery,
+          maxResults: 5, // Get a few results to find the right one
+        });
+
+        const messages = searchResponse.data.messages || [];
+        
+        // If we found messages, check them to find the one matching our subject
+        for (const message of messages) {
+          try {
+            const messageDetails = await gmail.users.messages.get({
+              userId: 'me',
+              id: message.id,
+              format: 'metadata',
+              metadataHeaders: ['Subject', 'To'],
+            });
+
+            const headers = messageDetails.data.payload?.headers || [];
+            const msgSubject = headers.find((h: any) => h.name === 'Subject')?.value || '';
+            const msgTo = headers.find((h: any) => h.name === 'To')?.value || '';
+
+            // Check if this matches our email
+            if (msgSubject === subject || (msgSubject.includes(subject.substring(0, 30)) && to.some(email => msgTo.includes(email)))) {
+              messageId = message.id;
+              break;
+            }
+          } catch (err) {
+            // Continue to next message
+            continue;
+          }
+        }
+
+        if (messageId) {
+          break;
+        }
+      } catch (searchError) {
+        // Try next search query
+        continue;
+      }
+    }
+
+    if (!messageId) {
+      console.log('⚠️ Could not find sent email to apply labels. Email may still be processing in Gmail.');
+      console.log('💡 Labels will need to be applied manually in Gmail.');
+      return false;
+    }
+    
+    // Apply labels to the message
+    await gmail.users.messages.modify({
+      userId: 'me',
+      id: messageId,
+      requestBody: {
+        addLabelIds: labelIds,
+      },
+    });
+
+    console.log(`✅ Applied labels [${labels.join(', ')}] to email message ${messageId}`);
+    return true;
+  } catch (error: any) {
+    console.error('❌ Error applying labels to email:', error.message);
+    if (error.response) {
+      console.error('Gmail API error details:', error.response.data);
+    }
+    return false;
+  }
+}
+
 export async function registerRoutes(app: Express): Promise<Server> {
   const storage = new DrizzleStorage();
+
+  // Gmail labels listing endpoint
+  app.get('/api/gmail/labels', async (req, res) => {
+    try {
+      if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET || !process.env.GMAIL_REFRESH_TOKEN) {
+        return res.status(400).json({ error: 'Gmail API credentials not configured' });
+      }
+
+      const gmail = await getGmailClient();
+      const response = await gmail.users.labels.list({ userId: 'me' });
+
+      // Only return user-created labels, hide system labels like INBOX, SENT, etc.
+      const labels = (response.data.labels || [])
+        .filter((label: any) => label.type === 'user')
+        .map((label: any) => ({
+          id: label.id,
+          name: label.name,
+          type: label.type,
+        }));
+
+      res.json(labels);
+    } catch (error: any) {
+      console.error('❌ Error fetching Gmail labels:', error.message);
+      return res.status(500).json({ error: 'Failed to fetch Gmail labels' });
+    }
+  });
 
   // GST Portal API integration for fetching company details
   app.get('/api/gst-details/:gstin', async (req, res) => {
@@ -2310,6 +2485,414 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error('Export error:', error);
       res.status(500).json({ error: 'Failed to export data' });
+    }
+  });
+
+  // Supplier Email Management endpoints
+  app.get('/api/supplier-emails', async (req, res) => {
+    try {
+      const emails = await storage.getAllSupplierEmails();
+      res.json(emails);
+    } catch (error) {
+      console.error('Error fetching supplier emails:', error);
+      res.status(500).json({ error: 'Failed to fetch supplier emails' });
+    }
+  });
+
+  app.get('/api/supplier-emails/:supplierId', async (req, res) => {
+    try {
+      const { supplierId } = req.params;
+      const email = await storage.getSupplierEmailBySupplierId(supplierId);
+      if (!email) {
+        return res.status(404).json({ error: 'Email not found' });
+      }
+      res.json(email);
+    } catch (error) {
+      console.error('Error fetching supplier email:', error);
+      res.status(500).json({ error: 'Failed to fetch supplier email' });
+    }
+  });
+
+  app.post('/api/supplier-emails/bulk-upload', upload.single('file'), async (req, res) => {
+    try {
+      console.log('📧 Email upload request received');
+      
+      if (!req.file) {
+        console.error('❌ No file in request');
+        return res.status(400).json({ error: 'No file uploaded' });
+      }
+
+      console.log(`📄 Processing file: ${req.file.originalname}, size: ${req.file.size} bytes`);
+
+      // Parse Excel file
+      let workbook;
+      try {
+        workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+      } catch (parseError: any) {
+        console.error('❌ Error parsing Excel file:', parseError);
+        return res.status(400).json({ error: `Failed to parse Excel file: ${parseError.message}` });
+      }
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      const data = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[];
+
+      if (data.length < 2) {
+        return res.status(400).json({ error: 'File must contain at least a header row and one data row' });
+      }
+
+      // Get headers (first row)
+      const headers = data[0].map((h: any) => String(h || '').toLowerCase().trim());
+      
+      // Find email and name column indices
+      const emailIndex = headers.findIndex((h: string) => 
+        h.includes('email') || h === 'email'
+      );
+      const nameIndex = headers.findIndex((h: string) => 
+        h.includes('name') || h === 'name' || h.includes('supplier')
+      );
+
+      if (emailIndex === -1) {
+        return res.status(400).json({ error: 'Email column not found. Please ensure your file has an "email" column.' });
+      }
+
+      if (nameIndex === -1) {
+        return res.status(400).json({ error: 'Name column not found. Please ensure your file has a "name" column.' });
+      }
+
+      // Get all suppliers for validation
+      const allSuppliers = await storage.getAllSuppliers();
+      const supplierMap = new Map(allSuppliers.map(s => [s.name.toLowerCase(), s]));
+
+      // Process rows (skip header)
+      const emailData: { email: string; supplierName: string }[] = [];
+      const errors: string[] = [];
+
+      for (let i = 1; i < data.length; i++) {
+        const row = data[i];
+        const email = String(row[emailIndex] || '').trim();
+        const supplierName = String(row[nameIndex] || '').trim();
+
+        if (!email || !supplierName) {
+          continue; // Skip empty rows
+        }
+
+        // Validate email format
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) {
+          errors.push(`Row ${i + 1}: Invalid email format: ${email}`);
+          continue;
+        }
+
+        // Check if supplier exists
+        const supplier = supplierMap.get(supplierName.toLowerCase());
+        if (!supplier) {
+          errors.push(`Row ${i + 1}: Supplier not found: ${supplierName}`);
+          continue;
+        }
+
+        emailData.push({ email, supplierName });
+      }
+
+      if (emailData.length === 0) {
+        return res.status(400).json({ 
+          error: 'No valid email data found. Please check your file format.',
+          errors: errors.slice(0, 10) // Return first 10 errors
+        });
+      }
+
+      console.log(`✅ Found ${emailData.length} valid email entries to process`);
+
+      // Bulk upsert emails
+      let results: any[];
+      try {
+        results = await storage.bulkUpsertSupplierEmails(emailData);
+        console.log(`✅ Successfully processed ${results.length} emails`);
+      } catch (upsertError: any) {
+        console.error('❌ Error during bulk upsert:', upsertError);
+        return res.status(500).json({ 
+          error: 'Failed to save emails to database',
+          details: upsertError.message 
+        });
+      }
+
+      res.json({
+        success: true,
+        processedCount: results.length,
+        totalRows: data.length - 1,
+        skippedRows: (data.length - 1) - emailData.length,
+        errors: errors.length > 0 ? errors.slice(0, 10) : undefined,
+      });
+    } catch (error: any) {
+      console.error('❌ Error uploading supplier emails:', error);
+      console.error('Error stack:', error.stack);
+      
+      // Ensure we always return JSON, not HTML
+      if (!res.headersSent) {
+        res.status(500).json({ 
+          error: error.message || 'Failed to upload supplier emails',
+          details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
+      }
+    }
+  });
+
+  app.delete('/api/supplier-emails/:id', async (req, res) => {
+    try {
+      const { id } = req.params;
+      const deleted = await storage.deleteSupplierEmail(id);
+      if (!deleted) {
+        return res.status(404).json({ error: 'Email not found' });
+      }
+      res.json({ success: true, message: 'Email deleted successfully' });
+    } catch (error) {
+      console.error('Error deleting supplier email:', error);
+      res.status(500).json({ error: 'Failed to delete supplier email' });
+    }
+  });
+
+  // Send email endpoint
+  app.post('/api/supplier-emails/send', async (req, res) => {
+    try {
+      const { to, cc, subject, content, supplierNames, payoutSummary, dateRange, payoutOrders, labels, attachments } = req.body;
+
+      if (!to || !Array.isArray(to) || to.length === 0) {
+        return res.status(400).json({ error: 'No recipient email addresses provided' });
+      }
+
+      if (!subject || !content) {
+        return res.status(400).json({ error: 'Subject and content are required' });
+      }
+
+      console.log(`📧 Sending email to ${to.length} recipient(s):`, to);
+      console.log(`📋 Subject: ${subject}`);
+      console.log(`📝 Content length: ${content.length} characters`);
+
+      // Get SMTP configuration from environment variables
+      const smtpHost = process.env.SMTP_HOST;
+      const smtpPort = parseInt(process.env.SMTP_PORT || '587', 10);
+      const smtpSecure = process.env.SMTP_SECURE === 'true';
+      const smtpUser = process.env.SMTP_USER;
+      const smtpPassword = process.env.SMTP_PASSWORD;
+
+      if (!smtpHost || !smtpUser || !smtpPassword) {
+        console.error('❌ SMTP configuration missing');
+        return res.status(500).json({ 
+          error: 'SMTP configuration is missing. Please check your environment variables.',
+          required: ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASSWORD']
+        });
+      }
+
+      // Create nodemailer transporter
+      const transporter = nodemailer.createTransport({
+        host: smtpHost,
+        port: smtpPort,
+        secure: smtpSecure, // true for 465, false for other ports
+        auth: {
+          user: smtpUser,
+          pass: smtpPassword,
+        },
+        tls: {
+          // Do not fail on invalid certs
+          rejectUnauthorized: false
+        },
+        debug: process.env.NODE_ENV === 'development', // Enable debug logging in development
+        logger: process.env.NODE_ENV === 'development', // Enable logger in development
+      });
+
+      // Verify SMTP connection (optional, but helpful for debugging)
+      try {
+        await transporter.verify();
+        console.log('✅ SMTP server connection verified');
+      } catch (verifyError: any) {
+        console.error('❌ SMTP connection verification failed:', verifyError.message);
+        // Continue anyway - sometimes verification fails but sending works
+      }
+
+      // Generate Excel attachment if payout orders are provided
+      let excelAttachment = null;
+      if (payoutOrders && Array.isArray(payoutOrders) && payoutOrders.length > 0) {
+        try {
+          console.log(`📊 Generating Excel attachment with ${payoutOrders.length} orders`);
+          
+          // Prepare worksheet data
+          const worksheetData = [
+            ['AWB No', 'Supplier Name', 'Order Account', 'Courier', 'HSN', 'Product Name', 'Qty', 'Product Price (INR)', 'Line Amount (INR)', 'GST%', 'GST Amount (INR)', 'Price After GST (INR)', 'Delivered Date', 'Status'],
+            ...payoutOrders.map((order: any) => [
+              order.awbNo,
+              order.supplierName || '',
+              order.orderAccount || 'N/A',
+              order.courier || '',
+              order.hsn || '',
+              order.productName || '',
+              order.deliveredQty || 0,
+              (parseFloat(String(order.unitPrice)) || 0).toFixed(2),
+              (parseFloat(String(order.lineAmount)) || 0).toFixed(2),
+              `${order.gstPercent || 0}%`,
+              (parseFloat(String(order.gstAmount)) || 0).toFixed(2),
+              (parseFloat(String(order.totalWithGst)) || 0).toFixed(2),
+              order.deliveredDate || '',
+              order.status || ''
+            ])
+          ];
+
+          // Create Excel workbook
+          const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
+          const workbook = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(workbook, worksheet, 'Payout Data');
+
+          // Set column widths
+          const maxColWidths = worksheetData[0].map(() => 15);
+          worksheetData.forEach((row: any) => {
+            row.forEach((cell: any, colIndex: number) => {
+              const cellLength = String(cell || '').length;
+              if (cellLength > maxColWidths[colIndex]) {
+                maxColWidths[colIndex] = Math.min(cellLength + 2, 50);
+              }
+            });
+          });
+          worksheet['!cols'] = maxColWidths.map((width: number) => ({ width }));
+
+          // Generate Excel buffer
+          const excelBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'buffer' });
+          
+          // Generate filename
+          const supplierText = supplierNames && supplierNames.length > 0 
+            ? (supplierNames.length === 1 ? supplierNames[0].replace(/\s+/g, '_') : `${supplierNames.length}Suppliers`)
+            : 'Supplier';
+          const dateText = dateRange ? dateRange.replace(/\s+/g, '_').replace(/to/gi, '_') : new Date().toISOString().split('T')[0];
+          const filename = `Payout_Export_${supplierText}_${dateText}.xlsx`;
+
+          excelAttachment = {
+            filename: filename,
+            content: excelBuffer,
+            contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          };
+
+          console.log(`✅ Excel attachment generated: ${filename} (${excelBuffer.length} bytes)`);
+        } catch (excelError: any) {
+          console.error('❌ Error generating Excel attachment:', excelError);
+          // Continue without attachment if Excel generation fails
+        }
+      }
+
+      // Convert plain text content to HTML (preserve formatting)
+      const htmlContent = content
+        .replace(/\n/g, '<br>')
+        .replace(/━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━/g, '<hr style="border: 1px solid #ddd; margin: 10px 0;">')
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/₹/g, '₹');
+
+      // Prepare email attachments
+      const attachmentsArray: any[] = [];
+      if (excelAttachment) {
+        attachmentsArray.push(excelAttachment);
+      }
+      // Include any attachments provided from the client (e.g., PDF)
+      if (attachments && Array.isArray(attachments)) {
+        for (const att of attachments) {
+          if (att && att.filename && att.content) {
+            attachmentsArray.push({
+              filename: att.filename,
+              content: Buffer.from(att.content, 'base64'),
+              contentType: att.contentType || 'application/octet-stream',
+            });
+          }
+        }
+      }
+
+      // Send email to all recipients
+      const mailOptions: any = {
+        from: `"Vendor Payout System" <${smtpUser}>`,
+        to: to.join(', '),
+        cc: cc && Array.isArray(cc) && cc.length > 0 ? cc.join(', ') : undefined,
+        subject: subject,
+        text: content, // Plain text version
+        attachments: attachmentsArray,
+        html: `
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <meta charset="utf-8">
+              <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; padding: 20px; }
+                .content { padding: 0; }
+                .footer { padding: 15px 0; text-align: center; color: #6b7280; font-size: 0.9em; }
+                table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+                table th, table td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
+                table th { background-color: #f3f4f6; font-weight: bold; }
+                hr { border: none; border-top: 2px solid #e5e7eb; margin: 20px 0; }
+              </style>
+            </head>
+            <body>
+              <div class="content">
+                ${htmlContent}
+              </div>
+              <div class="footer">
+                <p>This is an automated email from the Vendor Payout System.</p>
+                <p>Please do not reply to this email.</p>
+              </div>
+            </body>
+          </html>
+        `,
+      };
+
+      // Send the email
+      const info = await transporter.sendMail(mailOptions);
+
+      console.log('✅ Email sent successfully:', info.messageId);
+      console.log('📧 Email response:', {
+        accepted: info.accepted,
+        rejected: info.rejected,
+        messageId: info.messageId,
+      });
+
+      // Apply Gmail labels using Gmail API if labels are provided
+      // Filter out empty labels and ensure we only use the labels provided by the user
+      const validLabels = labels && Array.isArray(labels) 
+        ? labels.filter((label: string) => label && label.trim().length > 0)
+        : [];
+      
+      let labelsApplied = false;
+      if (validLabels.length > 0) {
+        console.log(`🏷️ Attempting to apply labels: ${validLabels.join(', ')}`);
+        
+        try {
+          // Check if Gmail API credentials are available
+          if (process.env.GMAIL_CLIENT_ID && process.env.GMAIL_CLIENT_SECRET && process.env.GMAIL_REFRESH_TOKEN) {
+            const gmail = await getGmailClient();
+            labelsApplied = await applyLabelsToSentEmail(gmail, subject, to, validLabels);
+            
+            if (labelsApplied) {
+              console.log(`✅ Successfully applied labels: ${validLabels.join(', ')}`);
+            } else {
+              console.log(`⚠️ Could not apply labels. Email may still be processing in Gmail.`);
+            }
+          } else {
+            console.log('⚠️ Gmail API credentials not configured. Labels will not be applied.');
+          }
+        } catch (labelError: any) {
+          console.error('❌ Error applying labels:', labelError.message);
+          // Don't fail the email send if label application fails
+        }
+      }
+
+      res.json({
+        success: true,
+        message: `Email sent successfully to ${to.length} recipient(s)${excelAttachment ? ' with payout data attachment' : ''}${labelsApplied ? ' with labels applied' : ''}`,
+        recipients: to,
+        messageId: info.messageId,
+        accepted: info.accepted,
+        rejected: info.rejected,
+        attachmentIncluded: !!excelAttachment,
+        labels: validLabels,
+        labelsApplied: labelsApplied,
+      });
+    } catch (error: any) {
+      console.error('Error sending email:', error);
+      res.status(500).json({ 
+        error: 'Failed to send email',
+        details: error.message 
+      });
     }
   });
 

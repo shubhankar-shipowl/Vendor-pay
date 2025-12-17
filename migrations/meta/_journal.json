@@ -9,6 +9,14 @@
       "tag": "0000_slow_jane_foster",
       "breakpoints": true,
       "appliedAt": "2024-11-17T18:24:00.000Z"
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1765630719062,
+      "tag": "0001_chilly_banshee",
+      "breakpoints": true,
+      "appliedAt": "2025-12-13T12:58:40.637Z"
     }
   ]
 }
