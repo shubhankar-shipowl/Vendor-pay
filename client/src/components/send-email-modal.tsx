@@ -71,12 +71,16 @@ export function SendEmailModal({
   });
 
   // Fetch existing Gmail labels
-  const { data: gmailLabels = [], isLoading: gmailLabelsLoading } = useQuery({
+  const { data: gmailLabels = [], isLoading: gmailLabelsLoading, error: gmailLabelsError } = useQuery({
     queryKey: ['/api/gmail/labels'],
     enabled: open,
     retry: 2,
     retryDelay: 1000,
     refetchOnWindowFocus: false,
+    onError: (error: any) => {
+      console.warn('⚠️ Could not fetch Gmail labels. Gmail API may not be configured. Labels feature will be disabled.');
+      console.warn('Error details:', error);
+    },
   });
 
   // Get email addresses for selected suppliers
@@ -190,7 +194,7 @@ export function SendEmailModal({
     range: string
   ): string => {
     const supplierList = suppliers.length === 1 ? suppliers[0] : suppliers.join(', ');
-    const totalAmount = (parseFloat(String(summary.totalPostGstAmount)) || 0).toFixed(2);
+    const totalAmount = (parseFloat(String(summary.totalPreGstAmount)) || 0).toFixed(2);
     
     // Extract date range from summary or use the provided range
     let dateRangeFormatted = '';

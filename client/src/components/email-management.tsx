@@ -339,15 +339,26 @@ export function EmailManagement() {
                 Manage supplier email addresses
               </CardDescription>
             </div>
-            <Button
-              onClick={handleExport}
-              variant="outline"
-              className="bg-white text-purple-600 hover:bg-purple-50"
-              disabled={!emails || emails.length === 0}
-            >
-              <Download className="h-4 w-4 mr-2" />
-              Export
-            </Button>
+            <div className="flex items-center space-x-2">
+              <Button
+                onClick={handleExport}
+                variant="outline"
+                className="bg-white text-purple-600 hover:bg-purple-50"
+                disabled={!emails || emails.length === 0}
+              >
+                <Download className="h-4 w-4 mr-2" />
+                Export
+              </Button>
+              <Button
+                onClick={handleExport}
+                variant="outline"
+                className="bg-white text-purple-600 hover:bg-purple-50"
+                disabled={!emails || emails.length === 0}
+              >
+                <Download className="h-4 w-4 mr-2" />
+                Download Email Database
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="p-0">
