@@ -71,12 +71,41 @@ const upload = multer({
 
 // Gmail API helper functions
 async function getGmailClient() {
+  if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET) {
+    throw new Error('Gmail API credentials (CLIENT_ID or CLIENT_SECRET) are missing');
+  }
+
+  if (!process.env.GMAIL_REFRESH_TOKEN) {
+    throw new Error('Gmail API refresh token is missing');
+  }
+
+  // For refresh token flow, redirect URI should match one of the authorized redirect URIs
+  // in Google Cloud Console. Try multiple common options if not specified.
+  let redirectUri = process.env.GMAIL_REDIRECT_URI;
+  
+  // Common redirect URIs that work with refresh tokens
+  // If not specified, try these in order
+  const commonRedirectUris = [
+    'http://localhost',
+    'http://localhost:3000',
+    'http://localhost:3000/oauth2callback',
+    'urn:ietf:wg:oauth:2.0:oob',
+    'postmessage'
+  ];
+  
+  if (!redirectUri) {
+    // Default to first common option
+    redirectUri = commonRedirectUris[0];
+  }
+  
   const oauth2Client = new google.auth.OAuth2(
     process.env.GMAIL_CLIENT_ID,
     process.env.GMAIL_CLIENT_SECRET,
-    process.env.GMAIL_REDIRECT_URI
+    redirectUri
   );
 
+  // Set credentials with refresh token
+  // Note: When using refresh tokens, Google may still validate redirect URI
   oauth2Client.setCredentials({
     refresh_token: process.env.GMAIL_REFRESH_TOKEN,
   });
@@ -223,11 +252,76 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get('/api/gmail/labels', async (req, res) => {
     try {
       if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET || !process.env.GMAIL_REFRESH_TOKEN) {
-        return res.status(400).json({ error: 'Gmail API credentials not configured' });
+        console.log('⚠️ Gmail API credentials not configured. Returning empty labels array.');
+        return res.json([]); // Return empty array instead of error to prevent UI breakage
       }
 
-      const gmail = await getGmailClient();
-      const response = await gmail.users.labels.list({ userId: 'me' });
+      let response;
+      let lastError: any = null;
+      
+      // Build list of redirect URIs to try
+      const redirectUrisToTry = [];
+      
+      // Add configured redirect URI first if it exists
+      if (process.env.GMAIL_REDIRECT_URI) {
+        redirectUrisToTry.push(process.env.GMAIL_REDIRECT_URI);
+      }
+      
+      // Add common redirect URIs that work with refresh tokens
+      redirectUrisToTry.push(
+        'http://localhost',
+        'http://localhost:3000',
+        'http://localhost:3000/oauth2callback',
+        'urn:ietf:wg:oauth:2.0:oob',
+        'postmessage'
+      );
+      
+      // Remove duplicates
+      const uniqueRedirectUris = [...new Set(redirectUrisToTry)];
+      
+      // Try each redirect URI until one works
+      for (const redirectUri of uniqueRedirectUris) {
+        try {
+          const oauth2Client = new google.auth.OAuth2(
+            process.env.GMAIL_CLIENT_ID!,
+            process.env.GMAIL_CLIENT_SECRET!,
+            redirectUri
+          );
+          
+          oauth2Client.setCredentials({
+            refresh_token: process.env.GMAIL_REFRESH_TOKEN!,
+          });
+          
+          const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+          response = await gmail.users.labels.list({ userId: 'me' });
+          
+          // Success! Log which redirect URI worked
+          if (redirectUri !== process.env.GMAIL_REDIRECT_URI) {
+            console.log(`✅ Gmail API connected successfully with redirect URI: ${redirectUri}`);
+            console.log(`💡 Consider setting GMAIL_REDIRECT_URI=${redirectUri} in your environment variables`);
+          }
+          break; // Success, exit loop
+        } catch (error: any) {
+          lastError = error;
+          // Check if it's an invalid_client error
+          const isInvalidClient = error.message?.includes('invalid_client') || 
+                                  error.response?.data?.error === 'invalid_client' ||
+                                  error.code === 'invalid_client';
+          
+          if (!isInvalidClient) {
+            // If it's not an invalid_client error, it might be a different issue
+            // Log and continue trying other redirect URIs
+            console.log(`⚠️ Failed with redirect URI ${redirectUri}: ${error.message}`);
+          }
+          // Continue to next redirect URI
+          continue;
+        }
+      }
+      
+      // If we didn't get a response, throw the last error
+      if (!response) {
+        throw lastError || new Error('Failed to connect to Gmail API with any redirect URI');
+      }
 
       // Only return user-created labels, hide system labels like INBOX, SENT, etc.
       const labels = (response.data.labels || [])
@@ -241,7 +335,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(labels);
     } catch (error: any) {
       console.error('❌ Error fetching Gmail labels:', error.message);
-      return res.status(500).json({ error: 'Failed to fetch Gmail labels' });
+      
+      // Handle specific OAuth errors
+      const isInvalidClient = error.message?.includes('invalid_client') || 
+                              error.response?.data?.error === 'invalid_client' ||
+                              error.code === 'invalid_client';
+      
+      if (isInvalidClient) {
+        console.error('🔐 Gmail API authentication failed with invalid_client error.');
+        console.error('   This usually means the redirect URI doesn\'t match Google Cloud Console.');
+        console.error('   Tried multiple redirect URIs but none worked.');
+        console.error('   To fix:');
+        console.error('   1. Check Google Cloud Console → APIs & Services → Credentials');
+        console.error('   2. Find your OAuth 2.0 Client ID');
+        console.error('   3. Check "Authorized redirect URIs" list');
+        console.error('   4. Set GMAIL_REDIRECT_URI to match one of those URIs exactly');
+        console.error('   5. Or add one of these to authorized redirect URIs: http://localhost, urn:ietf:wg:oauth:2.0:oob');
+        // Return empty array instead of error to prevent UI breakage
+        return res.json([]);
+      }
+      
+      // For other errors, also return empty array to prevent UI breakage
+      console.error('⚠️ Returning empty labels array due to error');
+      return res.json([]);
     }
   });
 
@@ -2802,7 +2918,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Send email to all recipients
       const mailOptions: any = {
-        from: `"Vendor Payout System" <${smtpUser}>`,
+        from: `"Shipowl Finance Team" <${smtpUser}>`,
         to: to.join(', '),
         cc: cc && Array.isArray(cc) && cc.length > 0 ? cc.join(', ') : undefined,
         subject: subject,
@@ -2816,7 +2932,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
               <style>
                 body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; padding: 20px; }
                 .content { padding: 0; }
-                .footer { padding: 15px 0; text-align: center; color: #6b7280; font-size: 0.9em; }
                 table { width: 100%; border-collapse: collapse; margin: 15px 0; }
                 table th, table td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
                 table th { background-color: #f3f4f6; font-weight: bold; }
@@ -2826,10 +2941,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
             <body>
               <div class="content">
                 ${htmlContent}
-              </div>
-              <div class="footer">
-                <p>This is an automated email from the Vendor Payout System.</p>
-                <p>Please do not reply to this email.</p>
               </div>
             </body>
           </html>
