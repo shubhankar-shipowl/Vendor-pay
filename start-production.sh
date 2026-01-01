@@ -10,7 +10,53 @@ chmod 755 logs temp uploads
 export NODE_ENV=production
 
 echo "🧹 Cleaning previous PM2 processes..."
+# Ensure PM2 daemon is running
+pm2 ping >/dev/null 2>&1 || pm2 resurrect >/dev/null 2>&1 || true
+
+# Stop and delete the PM2 process
+pm2 stop vendor-payout-app 2>/dev/null || true
 pm2 delete vendor-payout-app 2>/dev/null || echo "No previous process to clean"
+
+# Give PM2 time to fully stop the process
+sleep 2
+
+# Load PORT from .env if it exists, otherwise use default
+if [ -f .env ]; then
+  export $(grep -v '^#' .env | grep PORT | xargs) 2>/dev/null || true
+fi
+PORT=${PORT:-5000}
+echo "🔍 Checking for processes on port $PORT..."
+
+# Function to kill process on a port
+kill_port() {
+  local port=$1
+  if command -v lsof >/dev/null 2>&1; then
+    PID=$(lsof -ti:$port 2>/dev/null)
+    if [ ! -z "$PID" ]; then
+      echo "⚠️  Found process $PID using port $port, killing it..."
+      kill -9 $PID 2>/dev/null || true
+      return 0
+    fi
+  elif command -v fuser >/dev/null 2>&1; then
+    fuser -k $port/tcp 2>/dev/null || true
+    return 0
+  fi
+  return 1
+}
+
+# Kill any process using the configured port
+kill_port $PORT
+
+# Also check common ports (3000, 5000) in case of misconfiguration
+if [ "$PORT" != "3000" ]; then
+  kill_port 3000
+fi
+if [ "$PORT" != "5000" ]; then
+  kill_port 5000
+fi
+
+# Wait a moment for ports to be released
+sleep 2
 
 echo "📥 Installing dependencies (including dev dependencies for build)..."
 npm ci --include=dev || npm install --include=dev
