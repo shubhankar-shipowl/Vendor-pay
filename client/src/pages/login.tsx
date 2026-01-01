@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/use-auth';
+import { queryClient } from '@/lib/queryClient';
 import { LogIn, Mail, Lock } from "lucide-react";
 
 export default function Login() {
@@ -47,18 +48,21 @@ export default function Login() {
       }
 
       if (data.success) {
-        // Refetch auth status
-        await refetch();
-        
         toast({
           title: "Login Successful",
           description: `Welcome back, ${data.user.username}!`,
           variant: "default",
         });
         
-        // Redirect to the original destination or dashboard
-        const redirect = new URLSearchParams(window.location.search).get('redirect') || '/';
-        setLocation(redirect);
+        // Invalidate and refetch auth status to ensure state is updated
+        queryClient.invalidateQueries({ queryKey: ['/api/auth/me'] });
+        
+        // Wait a brief moment for session cookie to be set, then refetch and redirect
+        setTimeout(async () => {
+          await refetch();
+          const redirect = new URLSearchParams(window.location.search).get('redirect') || '/';
+          setLocation(redirect);
+        }, 150);
       }
     } catch (err: any) {
       setError(err.message || 'An error occurred during login');

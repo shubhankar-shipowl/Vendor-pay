@@ -24,8 +24,9 @@ app.use(
       checkPeriod: 86400000, // Prune expired entries every 24h
     }),
     cookie: {
-      secure: process.env.NODE_ENV === 'production',
+      secure: process.env.SESSION_SECURE === 'true' || (process.env.NODE_ENV === 'production' && process.env.SESSION_SECURE !== 'false'),
       httpOnly: true,
+      sameSite: process.env.SESSION_SAME_SITE as 'strict' | 'lax' | 'none' || 'lax',
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     },
   })
