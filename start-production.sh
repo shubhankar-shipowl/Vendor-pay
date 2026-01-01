@@ -12,6 +12,9 @@ export NODE_ENV=production
 echo "🧹 Cleaning previous PM2 processes..."
 pm2 delete vendor-payout-app 2>/dev/null || echo "No previous process to clean"
 
+echo "📥 Installing dependencies (including dev dependencies for build)..."
+npm ci --include=dev || npm install --include=dev
+
 echo "📦 Building application..."
 npm run build
 
