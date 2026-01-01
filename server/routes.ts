@@ -4,6 +4,7 @@ import multer from 'multer';
 import * as XLSX from 'xlsx';
 import nodemailer from 'nodemailer';
 import { google } from 'googleapis';
+import passport from 'passport';
 import { DrizzleStorage } from './drizzle-storage';
 import {
   columnMappingSchema,
@@ -247,6 +248,65 @@ async function applyLabelsToSentEmail(gmail: any, subject: string, to: string[],
 
 export async function registerRoutes(app: Express): Promise<Server> {
   const storage = new DrizzleStorage();
+
+  // Authentication middleware
+  const requireAuth = (req: any, res: any, next: any) => {
+    if (req.isAuthenticated && req.isAuthenticated()) {
+      return next();
+    }
+    return res.status(401).json({ error: 'Unauthorized' });
+  };
+
+  // Login endpoint
+  app.post('/api/auth/login', (req: any, res: any, next: any) => {
+    passport.authenticate('local', { 
+      usernameField: 'username',
+      passwordField: 'password'
+    }, (err: any, user: any, info: any) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      if (!user) {
+        return res.status(401).json({ error: info?.message || 'Invalid credentials' });
+      }
+      req.logIn(user, (loginErr: any) => {
+        if (loginErr) {
+          return res.status(500).json({ error: 'Login failed' });
+        }
+        return res.json({ 
+          success: true, 
+          user: { id: user.id, username: user.username } 
+        });
+      });
+    })(req, res, next);
+  });
+
+  // Logout endpoint
+  app.post('/api/auth/logout', (req: any, res: any) => {
+    req.logout((err: any) => {
+      if (err) {
+        return res.status(500).json({ error: 'Logout failed' });
+      }
+      req.session.destroy((destroyErr: any) => {
+        if (destroyErr) {
+          return res.status(500).json({ error: 'Session destruction failed' });
+        }
+        res.clearCookie('connect.sid');
+        return res.json({ success: true });
+      });
+    });
+  });
+
+  // Check authentication status
+  app.get('/api/auth/me', (req: any, res: any) => {
+    if (req.isAuthenticated && req.isAuthenticated()) {
+      return res.json({ 
+        authenticated: true, 
+        user: { id: req.user.id, username: req.user.username } 
+      });
+    }
+    return res.json({ authenticated: false });
+  });
 
   // Gmail labels listing endpoint
   app.get('/api/gmail/labels', async (req, res) => {

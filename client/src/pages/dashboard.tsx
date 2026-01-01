@@ -3,14 +3,16 @@ import { useQuery } from '@tanstack/react-query';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Calendar, Download, Filter, Calculator, Truck, Package, Database, Users, FileText, TrendingUp, Upload, Receipt, Mail } from 'lucide-react';
+import { Calendar, Download, Filter, Calculator, Truck, Package, Database, Users, FileText, TrendingUp, Upload, Receipt, Mail, LogOut } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Link } from 'wouter';
+import { Link, useLocation } from 'wouter';
 import * as XLSX from 'xlsx';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiRequest } from '@/lib/queryClient';
 import { SendEmailModal } from '@/components/send-email-modal';
+import { logout, useAuth } from '@/hooks/use-auth';
+import { useToast } from '@/hooks/use-toast';
 
 
 
@@ -77,6 +79,29 @@ export default function Dashboard() {
   // Send email modal state
   const [isSendEmailModalOpen, setIsSendEmailModalOpen] = useState(false);
   const queryClient = useQueryClient();
+  const { user, refetch } = useAuth();
+  const [, setLocation] = useLocation();
+  const { toast } = useToast();
+
+  // Handle logout
+  const handleLogout = async () => {
+    try {
+      await logout();
+      await refetch();
+      toast({
+        title: "Logged Out",
+        description: "You have been successfully logged out",
+        variant: "default",
+      });
+      setLocation('/login');
+    } catch (error: any) {
+      toast({
+        title: "Logout Failed",
+        description: error.message || "An error occurred during logout",
+        variant: "destructive",
+      });
+    }
+  };
 
   // Get suppliers for dropdown
   const { data: suppliers = [] } = useQuery({
@@ -853,6 +878,15 @@ export default function Dashboard() {
                     <span>Email Management</span>
                   </Button>
                 </Link>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="flex items-center space-x-2 text-red-600 hover:text-red-700 hover:bg-red-50"
+                  onClick={handleLogout}
+                >
+                  <LogOut className="h-4 w-4" />
+                  <span>Logout</span>
+                </Button>
               </div>
             </div>
           </div>

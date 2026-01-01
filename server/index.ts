@@ -1,12 +1,40 @@
 import 'dotenv/config';
 import express, { type Request, Response, NextFunction } from 'express';
+import session from 'express-session';
+import MemoryStore from 'memorystore';
+import passport from 'passport';
 import cron from 'node-cron';
 import { registerRoutes } from './routes';
 import { setupVite, serveStatic, log } from './vite';
 import { closeDatabasePool } from './db';
 import { performBackup } from './backup';
+import './auth';
+import { createDefaultUser } from './auth';
 
 const app = express();
+
+// Session configuration
+const SessionStore = MemoryStore(session);
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET || 'your-secret-key-change-in-production',
+    resave: false,
+    saveUninitialized: false,
+    store: new SessionStore({
+      checkPeriod: 86400000, // Prune expired entries every 24h
+    }),
+    cookie: {
+      secure: process.env.NODE_ENV === 'production',
+      httpOnly: true,
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    },
+  })
+);
+
+// Initialize passport
+app.use(passport.initialize());
+app.use(passport.session());
+
 // Increase body size limits to allow PDF attachments in email payloads
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: false, limit: '25mb' }));
@@ -44,6 +72,9 @@ app.use((req, res, next) => {
 // Global error handlers will be set up after server initialization
 
 (async () => {
+  // Create default admin user if none exists
+  await createDefaultUser();
+  
   const server = await registerRoutes(app);
 
   // Global error handler for API routes - must be before Vite

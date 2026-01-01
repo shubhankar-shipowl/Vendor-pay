@@ -253,6 +253,47 @@ export function EmailManagement() {
     window.URL.revokeObjectURL(url);
   };
 
+  // Download template or database Excel file
+  const handleDownloadTemplate = () => {
+    const hasData = emails && emails.length > 0;
+    
+    const worksheetData = hasData
+      ? [
+          ['Email', 'Supplier Name'],
+          ...((emails || []) as any[]).map((email: any) => [
+            email.email,
+            email.supplierName,
+          ]),
+        ]
+      : [
+          ['Email', 'Supplier Name'],
+          ['example@supplier.com', 'Example Supplier Name'],
+        ];
+
+    const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Supplier Emails');
+
+    // Set column widths
+    worksheet['!cols'] = [
+      { width: 30 }, // Email
+      { width: 30 }, // Supplier Name
+    ];
+
+    const excelBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = hasData
+      ? `Supplier_Emails_${new Date().toISOString().split('T')[0]}.xlsx`
+      : `Supplier_Emails_Template.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="space-y-6">
       {/* Upload Section */}
@@ -350,10 +391,9 @@ export function EmailManagement() {
                 Export
               </Button>
               <Button
-                onClick={handleExport}
+                onClick={handleDownloadTemplate}
                 variant="outline"
                 className="bg-white text-purple-600 hover:bg-purple-50"
-                disabled={!emails || emails.length === 0}
               >
                 <Download className="h-4 w-4 mr-2" />
                 Download Email Database
