@@ -24,9 +24,11 @@ app.use(
       checkPeriod: 86400000, // Prune expired entries every 24h
     }),
     cookie: {
-      secure: process.env.SESSION_SECURE === 'true' || (process.env.NODE_ENV === 'production' && process.env.SESSION_SECURE !== 'false'),
+      // Only set secure to true if explicitly enabled (for HTTPS)
+      // Default to false to work with HTTP
+      secure: process.env.SESSION_SECURE === 'true',
       httpOnly: true,
-      sameSite: process.env.SESSION_SAME_SITE as 'strict' | 'lax' | 'none' || 'lax',
+      sameSite: (process.env.SESSION_SAME_SITE as 'strict' | 'lax' | 'none') || 'lax',
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     },
   })

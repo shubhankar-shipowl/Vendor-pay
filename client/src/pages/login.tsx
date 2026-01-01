@@ -54,15 +54,17 @@ export default function Login() {
           variant: "default",
         });
         
-        // Invalidate and refetch auth status to ensure state is updated
+        // Get redirect destination
+        const redirect = new URLSearchParams(window.location.search).get('redirect') || '/';
+        
+        // Invalidate auth query cache to ensure fresh state
         queryClient.invalidateQueries({ queryKey: ['/api/auth/me'] });
         
-        // Wait a brief moment for session cookie to be set, then refetch and redirect
-        setTimeout(async () => {
-          await refetch();
-          const redirect = new URLSearchParams(window.location.search).get('redirect') || '/';
-          setLocation(redirect);
-        }, 150);
+        // Use a hard redirect to ensure it works reliably in production
+        // This forces a full page reload which ensures the session cookie is properly read
+        setTimeout(() => {
+          window.location.href = redirect;
+        }, 500);
       }
     } catch (err: any) {
       setError(err.message || 'An error occurred during login');
