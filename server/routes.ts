@@ -322,11 +322,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Determine redirect URI from request or use default
       let redirectUri = req.query.redirect_uri as string | undefined;
       
-      // If not provided, construct from request
+      // If not provided, use env var or construct from request
       if (!redirectUri) {
-        const protocol = req.protocol || 'http';
-        const host = req.get('host') || 'localhost:3001';
-        redirectUri = `${protocol}://${host}/api/gmail/oauth2callback`;
+        if (process.env.GMAIL_REDIRECT_URI) {
+          redirectUri = process.env.GMAIL_REDIRECT_URI;
+        } else {
+          const protocol = req.protocol || 'http';
+          const host = req.get('host') || 'localhost:3001';
+          redirectUri = `${protocol}://${host}/api/gmail/oauth2callback`;
+        }
       }
       
       console.log('📋 Attempting to get auth URL with redirect URI:', redirectUri);

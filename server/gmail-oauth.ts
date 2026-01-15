@@ -129,11 +129,13 @@ function createOAuth2Client(redirectUri?: string): OAuth2Client {
   const clientSecret = creds.client_secret;
   const redirectUris = creds.redirect_uris || [];
 
-  // Use provided redirect URI or first from credentials, or default
+  // Use provided redirect URI, env var, or first from credentials
+  const envRedirectUri = process.env.GMAIL_REDIRECT_URI;
   const finalRedirectUri =
     redirectUri ||
+    envRedirectUri ||
     redirectUris[0] ||
-    'http://localhost:5000/api/gmail/oauth2callback';
+    'http://localhost/api/gmail/oauth2callback';
 
   return new google.auth.OAuth2(clientId, clientSecret, finalRedirectUri);
 }
@@ -142,12 +144,19 @@ function createOAuth2Client(redirectUri?: string): OAuth2Client {
  * Get authorization URL for OAuth2 flow
  */
 export function getAuthUrl(redirectUri?: string): { url: string; redirectUri: string } {
-  const oauth2Client = createOAuth2Client(redirectUri);
-  // Use provided redirect URI or first from credentials, or default
+  // Priority for redirect URI:
+  // 1. Explicit parameter
+  // 2. GMAIL_REDIRECT_URI environment variable (for VPS/production)
+  // 3. First URI from credentials file
+  // 4. Default localhost
+  const envRedirectUri = process.env.GMAIL_REDIRECT_URI;
+  
   const finalRedirectUri =
     redirectUri ||
-    (oauth2Client as any).redirectUri ||
-    'http://localhost:5000/api/gmail/oauth2callback';
+    envRedirectUri ||
+    'http://localhost/api/gmail/oauth2callback';
+
+  const oauth2Client = createOAuth2Client(finalRedirectUri);
 
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline', // Required to get refresh token
