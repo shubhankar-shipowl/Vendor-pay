@@ -7,6 +7,13 @@ import { google } from 'googleapis';
 import passport from 'passport';
 import { DrizzleStorage } from './drizzle-storage';
 import {
+  getGmailClient,
+  getAuthUrl,
+  getTokenFromCode,
+  isAuthenticated,
+  revokeAuth,
+} from './gmail-oauth';
+import {
   columnMappingSchema,
   insertPriceEntrySchema,
   reportFiltersSchema,
@@ -70,48 +77,36 @@ const upload = multer({
   },
 });
 
-// Gmail API helper functions
-async function getGmailClient() {
-  if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET) {
-    throw new Error('Gmail API credentials (CLIENT_ID or CLIENT_SECRET) are missing');
+// Gmail API helper functions - now using OAuth2 service
+// Legacy function name kept for compatibility, but uses new OAuth service
+async function getGmailClientLegacy() {
+  // Try new OAuth service first
+  try {
+    return await getGmailClient();
+  } catch (error: any) {
+    // Fallback to environment variables if OAuth not configured
+    if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET) {
+      throw new Error('Gmail API credentials not configured. Please complete OAuth2 flow at /api/gmail/auth');
+    }
+
+    if (!process.env.GMAIL_REFRESH_TOKEN) {
+      throw new Error('Gmail API refresh token is missing. Please complete OAuth2 flow at /api/gmail/auth');
+    }
+
+    let redirectUri = process.env.GMAIL_REDIRECT_URI || 'http://localhost:5000/api/gmail/oauth2callback';
+    
+    const oauth2Client = new google.auth.OAuth2(
+      process.env.GMAIL_CLIENT_ID,
+      process.env.GMAIL_CLIENT_SECRET,
+      redirectUri
+    );
+
+    oauth2Client.setCredentials({
+      refresh_token: process.env.GMAIL_REFRESH_TOKEN,
+    });
+
+    return google.gmail({ version: 'v1', auth: oauth2Client });
   }
-
-  if (!process.env.GMAIL_REFRESH_TOKEN) {
-    throw new Error('Gmail API refresh token is missing');
-  }
-
-  // For refresh token flow, redirect URI should match one of the authorized redirect URIs
-  // in Google Cloud Console. Try multiple common options if not specified.
-  let redirectUri = process.env.GMAIL_REDIRECT_URI;
-  
-  // Common redirect URIs that work with refresh tokens
-  // If not specified, try these in order
-  const commonRedirectUris = [
-    'http://localhost',
-    'http://localhost:3000',
-    'http://localhost:3000/oauth2callback',
-    'urn:ietf:wg:oauth:2.0:oob',
-    'postmessage'
-  ];
-  
-  if (!redirectUri) {
-    // Default to first common option
-    redirectUri = commonRedirectUris[0];
-  }
-  
-  const oauth2Client = new google.auth.OAuth2(
-    process.env.GMAIL_CLIENT_ID,
-    process.env.GMAIL_CLIENT_SECRET,
-    redirectUri
-  );
-
-  // Set credentials with refresh token
-  // Note: When using refresh tokens, Google may still validate redirect URI
-  oauth2Client.setCredentials({
-    refresh_token: process.env.GMAIL_REFRESH_TOKEN,
-  });
-
-  return google.gmail({ version: 'v1', auth: oauth2Client });
 }
 
 async function getOrCreateLabel(gmail: any, labelName: string): Promise<string | null> {
@@ -308,115 +303,261 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return res.json({ authenticated: false });
   });
 
+  // ============================================
+  // Gmail OAuth2 Endpoints
+  // ============================================
+
+  // Initiate Gmail OAuth2 authorization flow
+  app.get('/api/gmail/auth', async (req, res) => {
+    try {
+      console.log('🔐 Gmail OAuth2 authorization request received');
+      console.log(`📍 Request URL: ${req.protocol}://${req.get('host')}${req.originalUrl}`);
+      
+      // Determine redirect URI from request or use default
+      let redirectUri = req.query.redirect_uri as string | undefined;
+      
+      // If not provided, construct from request
+      if (!redirectUri) {
+        const protocol = req.protocol || 'http';
+        const host = req.get('host') || 'localhost:3001';
+        redirectUri = `${protocol}://${host}/api/gmail/oauth2callback`;
+      }
+      
+      console.log('📋 Attempting to get auth URL with redirect URI:', redirectUri);
+      const { url, redirectUri: finalRedirectUri } = getAuthUrl(redirectUri);
+      
+      console.log('🔐 Initiating Gmail OAuth2 flow');
+      console.log(`📍 Redirect URI: ${finalRedirectUri}`);
+      console.log(`🌐 Request origin: ${req.protocol}://${req.get('host')}`);
+      console.log(`🔗 Google OAuth URL: ${url.substring(0, 100)}...`);
+      
+      // Store redirect URI in session for callback
+      if (req.session) {
+        (req.session as any).gmailRedirectUri = finalRedirectUri;
+      }
+      
+      res.redirect(url);
+    } catch (error: any) {
+      console.error('❌ Error initiating Gmail OAuth:', error);
+      console.error('❌ Error stack:', error.stack);
+      
+      // Return detailed error for debugging
+      const errorMessage = error.message || 'Unknown error';
+      const isCredentialsError = errorMessage.includes('Credentials file not found') || 
+                                 errorMessage.includes('credentials.json');
+      
+      if (isCredentialsError) {
+        return res.status(400).json({ 
+          error: 'Gmail API credentials not configured',
+          message: errorMessage,
+          hint: 'Please ensure credentials.json or @credentials.json exists in the root directory with valid OAuth2 credentials.'
+        });
+      }
+      
+      res.status(500).json({ 
+        error: 'Failed to initiate Gmail authorization',
+        message: errorMessage,
+        details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      });
+    }
+  });
+
+  // OAuth2 callback handler
+  app.get('/api/gmail/oauth2callback', async (req, res) => {
+    try {
+      const code = req.query.code as string;
+      const error = req.query.error as string | undefined;
+
+      if (error) {
+        console.error('❌ OAuth2 error:', error);
+        return res.status(400).send(`
+          <html>
+            <body>
+              <h1>Authorization Failed</h1>
+              <p>Error: ${error}</p>
+              <p><a href="/api/gmail/auth">Try again</a></p>
+            </body>
+          </html>
+        `);
+      }
+
+      if (!code) {
+        return res.status(400).send(`
+          <html>
+            <body>
+              <h1>Authorization Failed</h1>
+              <p>No authorization code received.</p>
+              <p><a href="/api/gmail/auth">Try again</a></p>
+            </body>
+          </html>
+        `);
+      }
+
+      // Get redirect URI from session or construct from request
+      let redirectUri = (req.session as any)?.gmailRedirectUri || 
+                       req.query.redirect_uri as string | undefined;
+      
+      // If still not set, construct from request
+      if (!redirectUri) {
+        const protocol = req.protocol || 'http';
+        const host = req.get('host') || 'localhost:5000';
+        redirectUri = `${protocol}://${host}/api/gmail/oauth2callback`;
+      }
+
+      console.log('🔄 Exchanging authorization code for tokens...');
+      await getTokenFromCode(code, redirectUri);
+      
+      console.log('✅ Gmail OAuth2 authorization successful!');
+      
+      res.send(`
+        <html>
+          <head>
+            <title>Authorization Successful</title>
+            <style>
+              body {
+                font-family: Arial, sans-serif;
+                max-width: 600px;
+                margin: 50px auto;
+                padding: 20px;
+                background: #f5f5f5;
+              }
+              .success {
+                background: #d4edda;
+                border: 1px solid #c3e6cb;
+                color: #155724;
+                padding: 20px;
+                border-radius: 5px;
+                margin-bottom: 20px;
+              }
+              .info {
+                background: #d1ecf1;
+                border: 1px solid #bee5eb;
+                color: #0c5460;
+                padding: 15px;
+                border-radius: 5px;
+                margin-bottom: 20px;
+              }
+              a {
+                color: #007bff;
+                text-decoration: none;
+              }
+              a:hover {
+                text-decoration: underline;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="success">
+              <h1>✅ Authorization Successful!</h1>
+              <p>Gmail API access has been granted. You can now use Gmail features.</p>
+            </div>
+            <div class="info">
+              <p><strong>What's next?</strong></p>
+              <ul>
+                <li>You can now use Gmail labels when sending emails</li>
+                <li>Tokens are stored securely in <code>token.json</code></li>
+                <li>Access will be automatically refreshed when needed</li>
+              </ul>
+            </div>
+            <p><a href="/">Return to application</a></p>
+          </body>
+        </html>
+      `);
+    } catch (error: any) {
+      console.error('❌ Error in OAuth2 callback:', error.message);
+      res.status(500).send(`
+        <html>
+          <body>
+            <h1>Authorization Failed</h1>
+            <p>Error: ${error.message}</p>
+            <p><a href="/api/gmail/auth">Try again</a></p>
+          </body>
+        </html>
+      `);
+    }
+  });
+
+  // Check Gmail OAuth2 status
+  app.get('/api/gmail/status', async (req, res) => {
+    try {
+      const authenticated = await isAuthenticated();
+      res.json({ 
+        authenticated,
+        message: authenticated 
+          ? 'Gmail API is authenticated and ready to use'
+          : 'Gmail API is not authenticated. Visit /api/gmail/auth to authorize'
+      });
+    } catch (error: any) {
+      res.status(500).json({ 
+        authenticated: false,
+        error: error.message 
+      });
+    }
+  });
+
+  // Revoke Gmail OAuth2 access
+  app.post('/api/gmail/revoke', requireAuth, async (req, res) => {
+    try {
+      await revokeAuth();
+      res.json({ 
+        success: true,
+        message: 'Gmail authorization revoked successfully'
+      });
+    } catch (error: any) {
+      console.error('❌ Error revoking Gmail auth:', error.message);
+      res.status(500).json({ 
+        error: 'Failed to revoke authorization',
+        details: error.message 
+      });
+    }
+  });
+
   // Gmail labels listing endpoint
   app.get('/api/gmail/labels', async (req, res) => {
     try {
-      if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET || !process.env.GMAIL_REFRESH_TOKEN) {
-        console.log('⚠️ Gmail API credentials not configured. Returning empty labels array.');
-        return res.json([]); // Return empty array instead of error to prevent UI breakage
-      }
+      // Try new OAuth service first
+      try {
+        const gmail = await getGmailClient();
+        const response = await gmail.users.labels.list({ userId: 'me' });
 
-      let response;
-      let lastError: any = null;
-      
-      // Build list of redirect URIs to try
-      const redirectUrisToTry = [];
-      
-      // Add configured redirect URI first if it exists
-      if (process.env.GMAIL_REDIRECT_URI) {
-        redirectUrisToTry.push(process.env.GMAIL_REDIRECT_URI);
-      }
-      
-      // Add common redirect URIs that work with refresh tokens
-      redirectUrisToTry.push(
-        'http://localhost',
-        'http://localhost:3000',
-        'http://localhost:3000/oauth2callback',
-        'urn:ietf:wg:oauth:2.0:oob',
-        'postmessage'
-      );
-      
-      // Remove duplicates
-      const uniqueRedirectUris = [...new Set(redirectUrisToTry)];
-      
-      // Try each redirect URI until one works
-      for (const redirectUri of uniqueRedirectUris) {
-        try {
-          const oauth2Client = new google.auth.OAuth2(
-            process.env.GMAIL_CLIENT_ID!,
-            process.env.GMAIL_CLIENT_SECRET!,
-            redirectUri
-          );
-          
-          oauth2Client.setCredentials({
-            refresh_token: process.env.GMAIL_REFRESH_TOKEN!,
-          });
-          
-          const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-          response = await gmail.users.labels.list({ userId: 'me' });
-          
-          // Success! Log which redirect URI worked
-          if (redirectUri !== process.env.GMAIL_REDIRECT_URI) {
-            console.log(`✅ Gmail API connected successfully with redirect URI: ${redirectUri}`);
-            console.log(`💡 Consider setting GMAIL_REDIRECT_URI=${redirectUri} in your environment variables`);
-          }
-          break; // Success, exit loop
-        } catch (error: any) {
-          lastError = error;
-          // Check if it's an invalid_client error
-          const isInvalidClient = error.message?.includes('invalid_client') || 
-                                  error.response?.data?.error === 'invalid_client' ||
-                                  error.code === 'invalid_client';
-          
-          if (!isInvalidClient) {
-            // If it's not an invalid_client error, it might be a different issue
-            // Log and continue trying other redirect URIs
-            console.log(`⚠️ Failed with redirect URI ${redirectUri}: ${error.message}`);
-          }
-          // Continue to next redirect URI
-          continue;
+        // Only return user-created labels, hide system labels like INBOX, SENT, etc.
+        const labels = (response.data.labels || [])
+          .filter((label: any) => label.type === 'user')
+          .map((label: any) => ({
+            id: label.id,
+            name: label.name,
+            type: label.type,
+          }));
+
+        return res.json(labels);
+      } catch (oauthError: any) {
+        // Fallback to legacy environment variable method
+        console.log('⚠️ OAuth service failed, trying legacy method:', oauthError.message);
+        
+        if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET || !process.env.GMAIL_REFRESH_TOKEN) {
+          console.log('⚠️ Gmail API credentials not configured. Returning empty labels array.');
+          return res.json([]); // Return empty array instead of error to prevent UI breakage
         }
-      }
-      
-      // If we didn't get a response, throw the last error
-      if (!response) {
-        throw lastError || new Error('Failed to connect to Gmail API with any redirect URI');
-      }
 
-      // Only return user-created labels, hide system labels like INBOX, SENT, etc.
-      const labels = (response.data.labels || [])
-        .filter((label: any) => label.type === 'user')
-        .map((label: any) => ({
-          id: label.id,
-          name: label.name,
-          type: label.type,
-        }));
+        const gmail = await getGmailClientLegacy();
+        const response = await gmail.users.labels.list({ userId: 'me' });
 
-      res.json(labels);
+        // Only return user-created labels, hide system labels like INBOX, SENT, etc.
+        const labels = (response.data.labels || [])
+          .filter((label: any) => label.type === 'user')
+          .map((label: any) => ({
+            id: label.id,
+            name: label.name,
+            type: label.type,
+          }));
+
+        return res.json(labels);
+      }
     } catch (error: any) {
       console.error('❌ Error fetching Gmail labels:', error.message);
       
-      // Handle specific OAuth errors
-      const isInvalidClient = error.message?.includes('invalid_client') || 
-                              error.response?.data?.error === 'invalid_client' ||
-                              error.code === 'invalid_client';
-      
-      if (isInvalidClient) {
-        console.error('🔐 Gmail API authentication failed with invalid_client error.');
-        console.error('   This usually means the redirect URI doesn\'t match Google Cloud Console.');
-        console.error('   Tried multiple redirect URIs but none worked.');
-        console.error('   To fix:');
-        console.error('   1. Check Google Cloud Console → APIs & Services → Credentials');
-        console.error('   2. Find your OAuth 2.0 Client ID');
-        console.error('   3. Check "Authorized redirect URIs" list');
-        console.error('   4. Set GMAIL_REDIRECT_URI to match one of those URIs exactly');
-        console.error('   5. Or add one of these to authorized redirect URIs: http://localhost, urn:ietf:wg:oauth:2.0:oob');
-        // Return empty array instead of error to prevent UI breakage
-        return res.json([]);
-      }
-      
-      // For other errors, also return empty array to prevent UI breakage
-      console.error('⚠️ Returning empty labels array due to error');
+      // Return empty array instead of error to prevent UI breakage
+      // Frontend will handle empty array gracefully
       return res.json([]);
     }
   });
@@ -3028,9 +3169,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         console.log(`🏷️ Attempting to apply labels: ${validLabels.join(', ')}`);
         
         try {
-          // Check if Gmail API credentials are available
-          if (process.env.GMAIL_CLIENT_ID && process.env.GMAIL_CLIENT_SECRET && process.env.GMAIL_REFRESH_TOKEN) {
-            const gmail = await getGmailClient();
+          // Try new OAuth service first, then fallback to legacy
+          let gmail;
+          try {
+            gmail = await getGmailClient();
+          } catch (oauthError: any) {
+            // Fallback to legacy method if OAuth not configured
+            if (process.env.GMAIL_CLIENT_ID && process.env.GMAIL_CLIENT_SECRET && process.env.GMAIL_REFRESH_TOKEN) {
+              gmail = await getGmailClientLegacy();
+            } else {
+              throw oauthError;
+            }
+          }
+          
+          if (gmail) {
             labelsApplied = await applyLabelsToSentEmail(gmail, subject, to, validLabels);
             
             if (labelsApplied) {

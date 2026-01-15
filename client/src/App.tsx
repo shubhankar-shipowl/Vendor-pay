@@ -39,6 +39,14 @@ function Router() {
   const [location] = useLocation();
   const { isAuthenticated, isLoading } = useAuth();
 
+  // Exclude API routes from client-side routing
+  // API routes should be handled by the backend server
+  // If we're on an API route, redirect to backend (port 3001) if needed
+  // API routes should be handled by the backend server
+  if (location.startsWith('/api/')) {
+    return null;
+  }
+
   // Show loading while checking auth
   if (isLoading) {
     return (

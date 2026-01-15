@@ -60,11 +60,11 @@ export default function Login() {
         // Invalidate auth query cache to ensure fresh state
         queryClient.invalidateQueries({ queryKey: ['/api/auth/me'] });
         
-        // Use a hard redirect to ensure it works reliably in production
-        // This forces a full page reload which ensures the session cookie is properly read
+        // Use client-side navigation instead of hard reload
+        // Wait briefly for the cache to invalidate
         setTimeout(() => {
-          window.location.href = redirect;
-        }, 500);
+          setLocation(redirect);
+        }, 100);
       }
     } catch (err: any) {
       setError(err.message || 'An error occurred during login');

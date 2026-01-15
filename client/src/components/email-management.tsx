@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Mail, Upload, Download, Trash2, CheckCircle2, XCircle, AlertCircle } from "lucide-react";
+import { Mail, Upload, Download, Trash2, CheckCircle2, XCircle, AlertCircle, Shield, ShieldCheck, ShieldAlert } from "lucide-react";
 import * as XLSX from 'xlsx';
 import { apiRequest } from '@/lib/queryClient';
 import { useToast } from '@/hooks/use-toast';
@@ -30,6 +30,14 @@ export function EmailManagement() {
   const { data: suppliers = [] } = useQuery({
     queryKey: ['/api/suppliers'],
     retry: 3,
+    retryDelay: 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  // Fetch Gmail authorization status
+  const { data: gmailStatus, refetch: refetchGmailStatus } = useQuery({
+    queryKey: ['/api/gmail/status'],
+    retry: 2,
     retryDelay: 1000,
     refetchOnWindowFocus: false,
   });
@@ -294,8 +302,96 @@ export function EmailManagement() {
     window.URL.revokeObjectURL(url);
   };
 
+  // Handle Gmail authorization
+  const handleGmailAuth = () => {
+    // Force a full page navigation to the backend API endpoint
+    // Using relative path to stay on the same host/port
+    window.location.href = '/api/gmail/auth';
+  };
+
+  const isGmailAuthenticated = (gmailStatus as any)?.authenticated === true;
+
   return (
     <div className="space-y-6">
+      {/* Gmail Authorization Status */}
+      <Card className="border-2 border-blue-200 shadow-lg">
+        <CardHeader className="bg-gradient-to-r from-blue-600 to-cyan-600 text-white rounded-t-lg">
+          <CardTitle className="flex items-center space-x-3">
+            <Shield className="h-6 w-6" />
+            <span>Gmail API Authorization</span>
+          </CardTitle>
+          <CardDescription className="text-blue-100">
+            Authorize Gmail API access to enable label management and advanced email features
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="p-6">
+          {isGmailAuthenticated ? (
+            <Alert className="bg-green-50 border-green-200">
+              <ShieldCheck className="h-5 w-5 text-green-600" />
+              <AlertDescription className="text-green-800">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <strong>Gmail API is authorized</strong>
+                    <p className="text-sm text-green-700 mt-1">
+                      You can now use Gmail labels when sending emails. Tokens are stored securely.
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      if (confirm('Are you sure you want to revoke Gmail authorization? You will need to re-authorize to use Gmail features.')) {
+                        apiRequest('/api/gmail/revoke', { method: 'POST' })
+                          .then(() => {
+                            refetchGmailStatus();
+                            toast({
+                              title: "Authorization Revoked",
+                              description: "Gmail authorization has been revoked successfully",
+                              variant: "default",
+                            });
+                          })
+                          .catch((error: any) => {
+                            toast({
+                              title: "Error",
+                              description: error.message || "Failed to revoke authorization",
+                              variant: "destructive",
+                            });
+                          });
+                      }
+                    }}
+                    className="ml-4 border-green-300 text-green-700 hover:bg-green-100"
+                  >
+                    Revoke Access
+                  </Button>
+                </div>
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <Alert className="bg-yellow-50 border-yellow-200">
+              <ShieldAlert className="h-5 w-5 text-yellow-600" />
+              <AlertDescription className="text-yellow-800">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <strong>Gmail API is not authorized</strong>
+                    <p className="text-sm text-yellow-700 mt-1">
+                      Authorize Gmail API to enable label management and advanced email features. 
+                      You'll be redirected to Google to grant permissions.
+                    </p>
+                  </div>
+                  <Button
+                    onClick={handleGmailAuth}
+                    className="ml-4 bg-blue-600 hover:bg-blue-700 text-white"
+                  >
+                    <Shield className="h-4 w-4 mr-2" />
+                    Authorize Gmail
+                  </Button>
+                </div>
+              </AlertDescription>
+            </Alert>
+          )}
+        </CardContent>
+      </Card>
+
       {/* Upload Section */}
       <Card className="border-2 border-purple-200 shadow-lg">
         <CardHeader className="bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-t-lg">
