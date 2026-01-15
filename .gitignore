@@ -9,4 +9,4 @@ backups/
 .env.local
 .env.*.local
 token.json
-@credentials.json
+@credentials.jsoncredentials.json
