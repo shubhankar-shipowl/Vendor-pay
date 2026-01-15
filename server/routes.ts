@@ -6,12 +6,18 @@ import nodemailer from 'nodemailer';
 import { google } from 'googleapis';
 import passport from 'passport';
 import { DrizzleStorage } from './drizzle-storage';
+import * as fs from 'fs';
 import {
   getGmailClient,
   getAuthUrl,
   getTokenFromCode,
   isAuthenticated,
   revokeAuth,
+  loadCredentials,
+  loadSavedToken,
+  getUserProfile,
+  getFreshAccessToken,
+  sendEmailViaGmailApi,
 } from './gmail-oauth';
 import {
   columnMappingSchema,
@@ -2999,8 +3005,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
-      // Create nodemailer transporter
-      const transporter = nodemailer.createTransport({
+      // Check if we can use Gmail API (more reliable than SMTP with OAuth2)
+      const gmailCredentialsPath = process.cwd() + '/credentials.json';
+      const gmailCredentialsAltPath = process.cwd() + '/@credentials.json';
+      const tokenPath = process.cwd() + '/token.json';
+      const hasGmailConfig = (fs.existsSync(gmailCredentialsPath) || fs.existsSync(gmailCredentialsAltPath)) && fs.existsSync(tokenPath);
+      
+      let useGmailApi = false;
+      if (hasGmailConfig) {
+        try {
+          const savedToken = loadSavedToken();
+          if (savedToken && savedToken.refresh_token) {
+            useGmailApi = true;
+            console.log('✅ Gmail API OAuth2 is available - will use Gmail API for sending');
+          }
+        } catch (e: any) {
+          console.log('⚠️ Gmail API not available:', e.message);
+        }
+      }
+      
+      // Create nodemailer transporter as fallback
+      let transporter = nodemailer.createTransport({
         host: smtpHost,
         port: smtpPort,
         secure: smtpSecure, // true for 465, false for other ports
@@ -3012,18 +3037,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // Do not fail on invalid certs
           rejectUnauthorized: false
         },
-        debug: process.env.NODE_ENV === 'development', // Enable debug logging in development
-        logger: process.env.NODE_ENV === 'development', // Enable logger in development
+        debug: process.env.NODE_ENV === 'development',
+        logger: process.env.NODE_ENV === 'development',
       });
-
-      // Verify SMTP connection (optional, but helpful for debugging)
-      try {
-        await transporter.verify();
-        console.log('✅ SMTP server connection verified');
-      } catch (verifyError: any) {
-        console.error('❌ SMTP connection verification failed:', verifyError.message);
-        // Continue anyway - sometimes verification fails but sending works
-      }
 
       // Generate Excel attachment if payout orders are provided
       let excelAttachment = null;
@@ -3117,45 +3133,90 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
 
-      // Send email to all recipients
-      const mailOptions: any = {
-        from: `"Shipowl Finance Team" <${smtpUser}>`,
-        to: to.join(', '),
-        cc: cc && Array.isArray(cc) && cc.length > 0 ? cc.join(', ') : undefined,
-        subject: subject,
-        text: content, // Plain text version
-        attachments: attachmentsArray,
-        html: `
-          <!DOCTYPE html>
-          <html>
-            <head>
-              <meta charset="utf-8">
-              <style>
-                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; padding: 20px; }
-                .content { padding: 0; }
-                table { width: 100%; border-collapse: collapse; margin: 15px 0; }
-                table th, table td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
-                table th { background-color: #f3f4f6; font-weight: bold; }
-                hr { border: none; border-top: 2px solid #e5e7eb; margin: 20px 0; }
-              </style>
-            </head>
-            <body>
-              <div class="content">
-                ${htmlContent}
-              </div>
-            </body>
-          </html>
-        `,
-      };
+      // Build HTML email body
+      const fullHtmlContent = `
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <meta charset="utf-8">
+            <style>
+              body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; padding: 20px; }
+              .content { padding: 0; }
+              table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+              table th, table td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
+              table th { background-color: #f3f4f6; font-weight: bold; }
+              hr { border: none; border-top: 2px solid #e5e7eb; margin: 20px 0; }
+            </style>
+          </head>
+          <body>
+            <div class="content">
+              ${htmlContent}
+            </div>
+          </body>
+        </html>
+      `;
 
-      // Send the email
-      const info = await transporter.sendMail(mailOptions);
+      let info: any;
+      let sentViaGmailApi = false;
 
-      console.log('✅ Email sent successfully:', info.messageId);
+      // Try Gmail API first if available (more reliable than SMTP with OAuth2)
+      if (useGmailApi) {
+        try {
+          console.log('📧 Sending email via Gmail API...');
+          
+          // Convert attachments to Gmail API format
+          const gmailAttachments = attachmentsArray.map((att: any) => ({
+            filename: att.filename,
+            content: att.content,
+            contentType: att.contentType,
+          }));
+
+          const result = await sendEmailViaGmailApi({
+            to: to,
+            cc: cc && Array.isArray(cc) && cc.length > 0 ? cc : undefined,
+            subject: subject,
+            htmlContent: fullHtmlContent,
+            textContent: content,
+            attachments: gmailAttachments.length > 0 ? gmailAttachments : undefined,
+          });
+
+          info = {
+            messageId: result.messageId,
+            accepted: to,
+            rejected: [],
+          };
+          sentViaGmailApi = true;
+          console.log('✅ Email sent successfully via Gmail API:', result.messageId);
+        } catch (gmailError: any) {
+          console.error('❌ Gmail API send failed:', gmailError.message);
+          console.log('⚠️ Falling back to SMTP...');
+          useGmailApi = false; // Fall through to SMTP
+        }
+      }
+
+      // Fallback to SMTP if Gmail API not used or failed
+      if (!sentViaGmailApi) {
+        console.log('📧 Sending email via SMTP...');
+        
+        const mailOptions: any = {
+          from: `"Shipowl Finance Team" <${smtpUser}>`,
+          to: to.join(', '),
+          cc: cc && Array.isArray(cc) && cc.length > 0 ? cc.join(', ') : undefined,
+          subject: subject,
+          text: content,
+          attachments: attachmentsArray,
+          html: fullHtmlContent,
+        };
+
+        info = await transporter.sendMail(mailOptions);
+        console.log('✅ Email sent successfully via SMTP:', info.messageId);
+      }
+
       console.log('📧 Email response:', {
         accepted: info.accepted,
         rejected: info.rejected,
         messageId: info.messageId,
+        method: sentViaGmailApi ? 'Gmail API' : 'SMTP',
       });
 
       // Apply Gmail labels using Gmail API if labels are provided

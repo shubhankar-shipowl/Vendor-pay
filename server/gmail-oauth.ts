@@ -53,7 +53,7 @@ interface TokenData {
 /**
  * Load credentials from credentials.json or @credentials.json file
  */
-function loadCredentials(): Credentials {
+export function loadCredentials(): Credentials {
   try {
     const credentialsPath = getCredentialsPath();
     
@@ -87,7 +87,7 @@ function loadCredentials(): Credentials {
 /**
  * Load saved token from token.json
  */
-function loadSavedToken(): TokenData | null {
+export function loadSavedToken(): TokenData | null {
   try {
     if (!existsSync(TOKEN_PATH)) {
       return null;
@@ -143,7 +143,11 @@ function createOAuth2Client(redirectUri?: string): OAuth2Client {
  */
 export function getAuthUrl(redirectUri?: string): { url: string; redirectUri: string } {
   const oauth2Client = createOAuth2Client(redirectUri);
-  const finalRedirectUri = oauth2Client.redirectUri || redirectUri || 'http://localhost:5000/api/gmail/oauth2callback';
+  // Use provided redirect URI or first from credentials, or default
+  const finalRedirectUri =
+    redirectUri ||
+    (oauth2Client as any).redirectUri ||
+    'http://localhost:5000/api/gmail/oauth2callback';
 
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline', // Required to get refresh token
@@ -174,11 +178,11 @@ export async function getTokenFromCode(
     }
 
     const tokenData: TokenData = {
-      access_token: tokens.access_token,
-      refresh_token: tokens.refresh_token,
-      scope: tokens.scope,
-      token_type: tokens.token_type,
-      expiry_date: tokens.expiry_date,
+      access_token: tokens.access_token || undefined,
+      refresh_token: tokens.refresh_token || undefined,
+      scope: tokens.scope || undefined,
+      token_type: tokens.token_type || undefined,
+      expiry_date: tokens.expiry_date || undefined,
     };
 
     // Save token for future use
@@ -215,11 +219,11 @@ export async function getAuthenticatedClient(redirectUri?: string): Promise<OAut
       const { credentials } = await oauth2Client.refreshAccessToken();
       
       const updatedToken: TokenData = {
-        access_token: credentials.access_token,
-        refresh_token: savedToken.refresh_token || credentials.refresh_token, // Preserve refresh token
-        scope: credentials.scope || savedToken.scope,
-        token_type: credentials.token_type || savedToken.token_type,
-        expiry_date: credentials.expiry_date,
+        access_token: credentials.access_token || undefined,
+        refresh_token: (savedToken.refresh_token || credentials.refresh_token) || undefined, // Preserve refresh token
+        scope: (credentials.scope || savedToken.scope) || undefined,
+        token_type: (credentials.token_type || savedToken.token_type) || undefined,
+        expiry_date: credentials.expiry_date || undefined,
       };
 
       saveToken(updatedToken);
@@ -284,4 +288,161 @@ export async function revokeAuth(): Promise<void> {
     console.error('❌ Error revoking token:', error.message);
     throw error;
   }
+}
+
+/**
+ * Get the authenticated user's email profile
+ */
+export async function getUserProfile() {
+  try {
+    const gmail = await getGmailClient();
+    const response = await gmail.users.getProfile({ userId: 'me' });
+    return response.data;
+  } catch (error: any) {
+    console.error('❌ Error fetching user profile:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Get a fresh access token (refreshes if needed)
+ * Returns the current valid access token
+ */
+export async function getFreshAccessToken(): Promise<string> {
+  const oauth2Client = await getAuthenticatedClient();
+  const credentials = oauth2Client.credentials;
+  
+  if (!credentials.access_token) {
+    throw new Error('No access token available after refresh');
+  }
+  
+  return credentials.access_token;
+}
+
+/**
+ * Send email using Gmail API (more reliable than SMTP with OAuth2)
+ */
+export async function sendEmailViaGmailApi(options: {
+  to: string[];
+  cc?: string[];
+  subject: string;
+  htmlContent: string;
+  textContent: string;
+  attachments?: Array<{
+    filename: string;
+    content: Buffer | string;
+    contentType: string;
+  }>;
+}): Promise<{ messageId: string; threadId: string }> {
+  const gmail = await getGmailClient();
+  const profile = await gmail.users.getProfile({ userId: 'me' });
+  const fromEmail = profile.data.emailAddress;
+
+  if (!fromEmail) {
+    throw new Error('Could not determine sender email address');
+  }
+
+  // Build the email message
+  const boundary = `boundary_${Date.now().toString(16)}`;
+  const hasAttachments = options.attachments && options.attachments.length > 0;
+
+  let emailLines: string[] = [];
+  
+  // Headers
+  emailLines.push(`From: ${fromEmail}`);
+  emailLines.push(`To: ${options.to.join(', ')}`);
+  if (options.cc && options.cc.length > 0) {
+    emailLines.push(`Cc: ${options.cc.join(', ')}`);
+  }
+  emailLines.push(`Subject: =?UTF-8?B?${Buffer.from(options.subject).toString('base64')}?=`);
+  emailLines.push('MIME-Version: 1.0');
+
+  if (hasAttachments) {
+    emailLines.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
+    emailLines.push('');
+    emailLines.push(`--${boundary}`);
+    emailLines.push('Content-Type: multipart/alternative; boundary="alt_boundary"');
+    emailLines.push('');
+    
+    // Plain text part
+    emailLines.push('--alt_boundary');
+    emailLines.push('Content-Type: text/plain; charset=UTF-8');
+    emailLines.push('Content-Transfer-Encoding: base64');
+    emailLines.push('');
+    emailLines.push(Buffer.from(options.textContent).toString('base64'));
+    emailLines.push('');
+    
+    // HTML part
+    emailLines.push('--alt_boundary');
+    emailLines.push('Content-Type: text/html; charset=UTF-8');
+    emailLines.push('Content-Transfer-Encoding: base64');
+    emailLines.push('');
+    emailLines.push(Buffer.from(options.htmlContent).toString('base64'));
+    emailLines.push('');
+    emailLines.push('--alt_boundary--');
+
+    // Attachments
+    for (const attachment of options.attachments!) {
+      emailLines.push('');
+      emailLines.push(`--${boundary}`);
+      emailLines.push(`Content-Type: ${attachment.contentType}; name="${attachment.filename}"`);
+      emailLines.push('Content-Transfer-Encoding: base64');
+      emailLines.push(`Content-Disposition: attachment; filename="${attachment.filename}"`);
+      emailLines.push('');
+      
+      const contentBuffer = typeof attachment.content === 'string' 
+        ? Buffer.from(attachment.content, 'base64')
+        : attachment.content;
+      emailLines.push(contentBuffer.toString('base64'));
+    }
+    
+    emailLines.push('');
+    emailLines.push(`--${boundary}--`);
+  } else {
+    emailLines.push('Content-Type: multipart/alternative; boundary="alt_boundary"');
+    emailLines.push('');
+    
+    // Plain text part
+    emailLines.push('--alt_boundary');
+    emailLines.push('Content-Type: text/plain; charset=UTF-8');
+    emailLines.push('Content-Transfer-Encoding: base64');
+    emailLines.push('');
+    emailLines.push(Buffer.from(options.textContent).toString('base64'));
+    emailLines.push('');
+    
+    // HTML part
+    emailLines.push('--alt_boundary');
+    emailLines.push('Content-Type: text/html; charset=UTF-8');
+    emailLines.push('Content-Transfer-Encoding: base64');
+    emailLines.push('');
+    emailLines.push(Buffer.from(options.htmlContent).toString('base64'));
+    emailLines.push('');
+    emailLines.push('--alt_boundary--');
+  }
+
+  const rawEmail = emailLines.join('\r\n');
+  const encodedEmail = Buffer.from(rawEmail)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+
+  // Send via Gmail API
+  const response = await gmail.users.messages.send({
+    userId: 'me',
+    requestBody: {
+      raw: encodedEmail,
+    },
+  });
+
+  if (!response.data.id) {
+    throw new Error('Failed to send email - no message ID returned');
+  }
+
+  console.log(`✅ Email sent via Gmail API. Message ID: ${response.data.id}`);
+  
+  return {
+    messageId: response.data.id,
+    threadId: response.data.threadId || response.data.id,
+  };
 }
