@@ -3,7 +3,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { CloudUpload, FileText, Info } from "lucide-react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 
 interface FileUploadProps {
@@ -18,6 +18,7 @@ export function FileUpload({ onFileUploaded }: FileUploadProps) {
   const [fileSize, setFileSize] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
+  const queryClient = useQueryClient();
 
   const uploadMutation = useMutation({
     mutationFn: async (file: File) => {
@@ -95,11 +96,14 @@ export function FileUpload({ onFileUploaded }: FileUploadProps) {
         throw new Error('Server returned non-JSON response for file upload');
       }
     },
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       const sizeInMB = data.size / (1024 * 1024);
       const sizeText = sizeInMB > 1 
         ? `${sizeInMB.toFixed(1)} MB` 
         : `${(data.size / 1024).toFixed(1)} KB`;
+      
+      // Invalidate order counts to refresh the UI immediately after upload
+      await queryClient.invalidateQueries({ queryKey: ['/api/orders/count-by-source'] });
       
       toast({
         title: "File uploaded successfully",

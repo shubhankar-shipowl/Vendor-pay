@@ -189,7 +189,16 @@ export function ColumnMapping({ fileData, onMappingComplete, source = 'parcelx' 
   const handleProcessingComplete = async (success: boolean, errorMessage?: string) => {
     setIsProcessing(false);
     if (success) {
-      // CRITICAL: Invalidate all order-related queries to refresh dashboard data
+      // Wait a moment for backend to finish writing all data
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      // CRITICAL: Force refetch all order-related queries to refresh dashboard data
+      await queryClient.refetchQueries({ queryKey: ['/api/orders'] });
+      await queryClient.refetchQueries({ queryKey: ['/api/orders/count-by-source'] });
+      await queryClient.refetchQueries({ queryKey: ['/api/dashboard/stats'] });
+      await queryClient.refetchQueries({ queryKey: ['/api/missing-price-entries'] });
+      
+      // Also invalidate to ensure fresh data on next access
       await queryClient.invalidateQueries({ queryKey: ['/api/orders'] });
       await queryClient.invalidateQueries({ queryKey: ['/api/orders/count-by-source'] });
       await queryClient.invalidateQueries({ queryKey: ['/api/dashboard/stats'] });
