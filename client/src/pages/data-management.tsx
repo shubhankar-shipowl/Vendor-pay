@@ -62,14 +62,22 @@ export default function DataManagement() {
       return response;
     },
     onSuccess: async () => {
-      // Force refetch all related queries
+      // Wait a moment for backend deletion to complete
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Force refetch all related queries (not just invalidate)
       await queryClient.refetchQueries({ queryKey: ['/api/orders/count-by-source'] });
+      await queryClient.refetchQueries({ queryKey: ['/api/orders'] });
+      await queryClient.refetchQueries({ queryKey: ['/api/dashboard/stats'] });
+      await queryClient.refetchQueries({ queryKey: ['/api/missing-price-entries'] });
+      
+      // Also invalidate to ensure fresh data
       await queryClient.invalidateQueries({ queryKey: ['/api/orders'] });
       await queryClient.invalidateQueries({ queryKey: ['/api/dashboard/stats'] });
-      await queryClient.invalidateQueries({ queryKey: ['/api/missing-price-entries'] });
+      
       toast({
         title: "Success",
-        description: "All order data has been cleared successfully. You can now upload new files.",
+        description: "All order data has been cleared successfully. Dashboard will refresh automatically.",
         variant: "default"
       });
     },
@@ -97,17 +105,25 @@ export default function DataManagement() {
       return response.json();
     },
     onSuccess: async (data) => {
-      // Force refetch all related queries
+      // Wait a moment for backend deletion to complete
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Force refetch all related queries (not just invalidate)
       await queryClient.refetchQueries({ queryKey: ['/api/orders/count-by-source'] });
+      await queryClient.refetchQueries({ queryKey: ['/api/orders'] });
+      await queryClient.refetchQueries({ queryKey: ['/api/dashboard/stats'] });
+      await queryClient.refetchQueries({ queryKey: ['/api/missing-price-entries'] });
+      
+      // Also invalidate to ensure fresh data
       await queryClient.invalidateQueries({ queryKey: ['/api/orders'] });
       await queryClient.invalidateQueries({ queryKey: ['/api/dashboard/stats'] });
-      await queryClient.invalidateQueries({ queryKey: ['/api/missing-price-entries'] });
+      
       setParcelXFileData(null);
       setParcelXColumnMapping(null);
       setParcelXStep(1);
       toast({
         title: "Parcel X Data Cleared",
-        description: `${data.deletedCount || 0} Parcel X orders have been deleted successfully.`,
+        description: `${data.deletedCount || 0} Parcel X orders have been deleted successfully. Dashboard will refresh automatically.`,
         variant: "default"
       });
     },
@@ -135,17 +151,25 @@ export default function DataManagement() {
       return response.json();
     },
     onSuccess: async (data) => {
-      // Force refetch all related queries
+      // Wait a moment for backend deletion to complete
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Force refetch all related queries (not just invalidate)
       await queryClient.refetchQueries({ queryKey: ['/api/orders/count-by-source'] });
+      await queryClient.refetchQueries({ queryKey: ['/api/orders'] });
+      await queryClient.refetchQueries({ queryKey: ['/api/dashboard/stats'] });
+      await queryClient.refetchQueries({ queryKey: ['/api/missing-price-entries'] });
+      
+      // Also invalidate to ensure fresh data
       await queryClient.invalidateQueries({ queryKey: ['/api/orders'] });
       await queryClient.invalidateQueries({ queryKey: ['/api/dashboard/stats'] });
-      await queryClient.invalidateQueries({ queryKey: ['/api/missing-price-entries'] });
+      
       setNimbusFileData(null);
       setNimbusColumnMapping(null);
       setNimbusStep(1);
       toast({
         title: "Nimbus Data Cleared",
-        description: `${data.deletedCount || 0} Nimbus orders have been deleted successfully.`,
+        description: `${data.deletedCount || 0} Nimbus orders have been deleted successfully. Dashboard will refresh automatically.`,
         variant: "default"
       });
     },
