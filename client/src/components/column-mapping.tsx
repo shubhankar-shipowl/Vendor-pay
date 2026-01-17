@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Table2, Wand2, Info, CheckCircle, MinusCircle, AlertCircle } from "lucide-react";
 import { detectColumnMapping, detectNimbusColumnMapping } from "@/lib/csv-parser";
@@ -62,6 +62,7 @@ export function ColumnMapping({ fileData, onMappingComplete, source = 'parcelx' 
   const optionalMappings = source === 'nimbus' ? nimbusOptionalMappings : parcelXOptionalMappings;
 
   const { toast } = useToast();
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     if (fileData?.headers) {
@@ -185,12 +186,18 @@ export function ColumnMapping({ fileData, onMappingComplete, source = 'parcelx' 
   const requiredMappedCount = requiredMappings.filter(field => mapping[field.key]).length;
   const isProcessingReady = requiredMappedCount === requiredMappings.length;
 
-  const handleProcessingComplete = (success: boolean, errorMessage?: string) => {
+  const handleProcessingComplete = async (success: boolean, errorMessage?: string) => {
     setIsProcessing(false);
     if (success) {
+      // CRITICAL: Invalidate all order-related queries to refresh dashboard data
+      await queryClient.invalidateQueries({ queryKey: ['/api/orders'] });
+      await queryClient.invalidateQueries({ queryKey: ['/api/orders/count-by-source'] });
+      await queryClient.invalidateQueries({ queryKey: ['/api/dashboard/stats'] });
+      await queryClient.invalidateQueries({ queryKey: ['/api/missing-price-entries'] });
+      
       toast({
         title: "Processing Complete",
-        description: `Your ${source === 'nimbus' ? 'Nimbus' : 'Parcel X'} data has been successfully processed.`,
+        description: `Your ${source === 'nimbus' ? 'Nimbus' : 'Parcel X'} data has been successfully processed. Dashboard will refresh automatically.`,
       });
       onMappingComplete(mapping, { success: true, source });
     } else {

@@ -116,7 +116,9 @@ export default function Dashboard() {
     queryKey: ['/api/orders'],
     retry: 3,
     retryDelay: 1000,
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: true, // Refresh when window regains focus
+    staleTime: 30000, // Consider data stale after 30 seconds
+    refetchInterval: 60000, // Auto-refetch every 60 seconds
   });
 
   // Get price entries for unit price lookup

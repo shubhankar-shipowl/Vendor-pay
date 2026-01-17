@@ -1472,6 +1472,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         `🎉 Processing complete! Total orders created: ${createdOrders.length}`,
       );
 
+      // CRITICAL: Invalidate orders cache AFTER all batches are complete
+      // This ensures fresh data is available after upload
+      ordersCache = null;
+      console.log(`🔄 Orders cache invalidated after processing complete`);
+
       // Generate summary
       const summary = {
         totalRecords: totalRawRecords,
