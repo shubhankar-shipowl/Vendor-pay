@@ -91,27 +91,27 @@ async function getGmailClientLegacy() {
     return await getGmailClient();
   } catch (error: any) {
     // Fallback to environment variables if OAuth not configured
-    if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET) {
+  if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET) {
       throw new Error('Gmail API credentials not configured. Please complete OAuth2 flow at /api/gmail/auth');
-    }
+  }
 
-    if (!process.env.GMAIL_REFRESH_TOKEN) {
+  if (!process.env.GMAIL_REFRESH_TOKEN) {
       throw new Error('Gmail API refresh token is missing. Please complete OAuth2 flow at /api/gmail/auth');
     }
 
     let redirectUri = process.env.GMAIL_REDIRECT_URI || 'http://localhost:5000/api/gmail/oauth2callback';
-    
-    const oauth2Client = new google.auth.OAuth2(
-      process.env.GMAIL_CLIENT_ID,
-      process.env.GMAIL_CLIENT_SECRET,
-      redirectUri
-    );
+  
+  const oauth2Client = new google.auth.OAuth2(
+    process.env.GMAIL_CLIENT_ID,
+    process.env.GMAIL_CLIENT_SECRET,
+    redirectUri
+  );
 
-    oauth2Client.setCredentials({
-      refresh_token: process.env.GMAIL_REFRESH_TOKEN,
-    });
+  oauth2Client.setCredentials({
+    refresh_token: process.env.GMAIL_REFRESH_TOKEN,
+  });
 
-    return google.gmail({ version: 'v1', auth: oauth2Client });
+  return google.gmail({ version: 'v1', auth: oauth2Client });
   }
 }
 
@@ -249,6 +249,10 @@ async function applyLabelsToSentEmail(gmail: any, subject: string, to: string[],
 
 export async function registerRoutes(app: Express): Promise<Server> {
   const storage = new DrizzleStorage();
+  
+  // In-memory cache for orders (to avoid repeated DB queries)
+  let ordersCache: { data: any[]; timestamp: number; etag: string } | null = null;
+  const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
   // Authentication middleware
   const requireAuth = (req: any, res: any, next: any) => {
@@ -324,7 +328,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       // If not provided, use env var or construct from request
       if (!redirectUri) {
-        if (process.env.GMAIL_REDIRECT_URI) {
+      if (process.env.GMAIL_REDIRECT_URI) {
           redirectUri = process.env.GMAIL_REDIRECT_URI;
         } else {
           const protocol = req.protocol || 'http';
@@ -502,7 +506,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         authenticated: false,
         error: error.message 
       });
-    }
+          }
   });
 
   // Revoke Gmail OAuth2 access
@@ -530,14 +534,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const gmail = await getGmailClient();
         const response = await gmail.users.labels.list({ userId: 'me' });
 
-        // Only return user-created labels, hide system labels like INBOX, SENT, etc.
-        const labels = (response.data.labels || [])
-          .filter((label: any) => label.type === 'user')
-          .map((label: any) => ({
-            id: label.id,
-            name: label.name,
-            type: label.type,
-          }));
+      // Only return user-created labels, hide system labels like INBOX, SENT, etc.
+      const labels = (response.data.labels || [])
+        .filter((label: any) => label.type === 'user')
+        .map((label: any) => ({
+          id: label.id,
+          name: label.name,
+          type: label.type,
+        }));
 
         return res.json(labels);
       } catch (oauthError: any) {
@@ -566,7 +570,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error: any) {
       console.error('❌ Error fetching Gmail labels:', error.message);
       
-      // Return empty array instead of error to prevent UI breakage
+        // Return empty array instead of error to prevent UI breakage
       // Frontend will handle empty array gracefully
       return res.json([]);
     }
@@ -1202,8 +1206,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post('/api/files/:fileId/process', async (req, res) => {
     try {
       const { fileId } = req.params;
+      const { source = 'parcelx' } = req.body || {}; // Default to parcelx for backward compatibility
 
-      console.log(`🔍 Processing request for file: ${fileId}`);
+      console.log(`🔍 Processing request for file: ${fileId} (source: ${source})`);
 
       // Try to get file from memory first, then database
       let file = global.tempFileMetadata?.get(fileId);
@@ -1293,6 +1298,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         (row) => row.status?.toLowerCase() !== 'cancelled',
       );
 
+      // CLEAR EXISTING DATA FOR THIS SOURCE BEFORE UPLOADING NEW DATA
+      const sourceName = source === 'nimbus' ? 'Nimbus' : 'Parcel X';
+      console.log(`🗑️ Clearing existing ${sourceName} data before uploading new data...`);
+      try {
+        const deletedCount = await storage.clearOrdersBySource(source);
+        console.log(`✅ Cleared ${deletedCount} existing ${sourceName} orders`);
+        // Invalidate orders cache
+        ordersCache = null;
+      } catch (deleteError) {
+        console.error(`⚠️ Error clearing existing ${sourceName} data:`, deleteError);
+        // Continue anyway - don't fail the upload if delete fails
+      }
+
       // OPTIMIZED PROCESSING: Pre-create all unique suppliers first
       const uniqueSuppliers = new Set(
         validOrders.map((row) => row.supplierName),
@@ -1334,7 +1352,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
 
       // Process in background (don't await) - fire and forget
-      processOrdersInBackground(fileId, validOrders, supplierMap, cancelledOrders, rawData.length, file).catch((error) => {
+      processOrdersInBackground(fileId, validOrders, supplierMap, cancelledOrders, rawData.length, file, source).catch((error) => {
         console.error('Background processing error:', error);
       });
       
@@ -1373,7 +1391,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     supplierMap: Map<string, any>,
     cancelledOrders: any[],
     totalRawRecords: number,
-    file: any
+    file: any,
+    source: string = 'parcelx'
   ) {
     try {
       const BATCH_SIZE = 2000; // Increased batch size for better performance
@@ -1416,10 +1435,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
           lineAmount: null,
           hsn: null,
           previousStatus: null,
+          source: source, // Track data source (parcelx or nimbus)
         }));
 
         try {
           const batchResults = await storage.createOrders(ordersToCreate);
+          // Invalidate orders cache when new orders are created
+          ordersCache = null;
           createdOrders.push(...batchResults);
           console.log(
             `⚡ Batch ${batchNum}/${totalBatches} - ${batchResults.length} orders saved`,
@@ -2083,10 +2105,63 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Orders endpoint - Get all saved orders
+  // Orders endpoint - OPTIMIZED with caching
   app.get('/api/orders', async (req, res) => {
     try {
+      const startTime = Date.now();
+      
+      // Check in-memory cache first
+      const now = Date.now();
+      if (ordersCache && (now - ordersCache.timestamp) < CACHE_TTL) {
+        // Check client ETag
+        if (req.headers['if-none-match'] === ordersCache.etag) {
+          res.status(304).end(); // Not Modified
+          return;
+        }
+        
+        res.set({
+          'ETag': ordersCache.etag,
+          'Cache-Control': 'private, max-age=300',
+          'Content-Type': 'application/json'
+        });
+        
+        const duration = Date.now() - startTime;
+        console.log(`📦 Served ${ordersCache.data.length} orders from cache in ${duration}ms`);
+        return res.json(ordersCache.data);
+      }
+      
+      // Cache miss or expired - fetch from database
       const orders = await storage.getAllOrders();
+      
+      // Generate ETag from orders count and last order ID
+      const ordersHash = orders.length > 0 
+        ? `${orders.length}-${orders[orders.length - 1]?.id || ''}`
+        : '0-empty';
+      const etag = `"${Buffer.from(ordersHash).toString('base64').slice(0, 16)}"`;
+      
+      // Check if client has cached version
+      if (req.headers['if-none-match'] === etag) {
+        res.status(304).end(); // Not Modified
+        return;
+      }
+      
+      // Update cache
+      ordersCache = {
+        data: orders,
+        timestamp: now,
+        etag
+      };
+      
+      // Set cache headers
+      res.set({
+        'ETag': etag,
+        'Cache-Control': 'private, max-age=300', // Cache for 5 minutes
+        'Content-Type': 'application/json'
+      });
+      
+      const duration = Date.now() - startTime;
+      console.log(`📦 Fetched ${orders.length} orders from DB in ${duration}ms`);
+      
       res.json(orders);
     } catch (error) {
       console.error('Get orders error:', error);
@@ -2735,16 +2810,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  // Orders endpoint
-  app.get('/api/orders', async (req, res) => {
-    try {
-      const orders = await storage.getAllOrders();
-      res.json(orders);
-    } catch (error) {
-      console.error('Get orders error:', error);
-      res.status(500).json({ error: 'Failed to get orders' });
-    }
-  });
+  // Orders endpoint - DUPLICATE REMOVED (using optimized version at line 2101)
 
   // Calculate payouts endpoint
   app.post('/api/calculate-payouts', async (req, res) => {
@@ -3139,25 +3205,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Build HTML email body
       const fullHtmlContent = `
-        <!DOCTYPE html>
-        <html>
-          <head>
-            <meta charset="utf-8">
-            <style>
-              body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; padding: 20px; }
-              .content { padding: 0; }
-              table { width: 100%; border-collapse: collapse; margin: 15px 0; }
-              table th, table td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
-              table th { background-color: #f3f4f6; font-weight: bold; }
-              hr { border: none; border-top: 2px solid #e5e7eb; margin: 20px 0; }
-            </style>
-          </head>
-          <body>
-            <div class="content">
-              ${htmlContent}
-            </div>
-          </body>
-        </html>
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <meta charset="utf-8">
+              <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; padding: 20px; }
+                .content { padding: 0; }
+                table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+                table th, table td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
+                table th { background-color: #f3f4f6; font-weight: bold; }
+                hr { border: none; border-top: 2px solid #e5e7eb; margin: 20px 0; }
+              </style>
+            </head>
+            <body>
+              <div class="content">
+                ${htmlContent}
+              </div>
+            </body>
+          </html>
       `;
 
       let info: any;
@@ -3240,7 +3306,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             gmail = await getGmailClient();
           } catch (oauthError: any) {
             // Fallback to legacy method if OAuth not configured
-            if (process.env.GMAIL_CLIENT_ID && process.env.GMAIL_CLIENT_SECRET && process.env.GMAIL_REFRESH_TOKEN) {
+          if (process.env.GMAIL_CLIENT_ID && process.env.GMAIL_CLIENT_SECRET && process.env.GMAIL_REFRESH_TOKEN) {
               gmail = await getGmailClientLegacy();
             } else {
               throw oauthError;
@@ -3341,6 +3407,57 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error('Error clearing orders data:', error);
       res.status(500).json({ error: 'Failed to clear orders data' });
+    }
+  });
+
+  // Clear orders by source (parcelx or nimbus) - FAST ASYNC DELETE
+  app.delete('/api/orders/clear-by-source/:source', async (req, res) => {
+    try {
+      const { source } = req.params;
+      
+      if (!source || !['parcelx', 'nimbus'].includes(source)) {
+        return res.status(400).json({ 
+          error: 'Invalid source', 
+          message: 'Source must be either "parcelx" or "nimbus"' 
+        });
+      }
+
+      const sourceName = source === 'parcelx' ? 'Parcel X' : 'Nimbus';
+      
+      // Get count first for immediate response
+      const countResult = await storage.getOrderCountBySource(source);
+      
+      // Respond immediately
+      res.json({
+        success: true,
+        message: `${sourceName} data deletion started`,
+        deletedCount: countResult,
+        source
+      });
+
+      // Delete in background (don't await)
+      storage.clearOrdersBySource(source).then((deletedCount) => {
+        console.log(`🗑️ ${sourceName} orders cleared: ${deletedCount} records deleted`);
+        // Invalidate orders cache after deletion
+        ordersCache = null;
+      }).catch((error) => {
+        console.error(`❌ Error deleting ${sourceName} orders:`, error);
+      });
+      
+    } catch (error) {
+      console.error('Error clearing orders by source:', error);
+      res.status(500).json({ error: 'Failed to clear orders data' });
+    }
+  });
+
+  // Get order counts by source - OPTIMIZED with SQL COUNT
+  app.get('/api/orders/count-by-source', async (req, res) => {
+    try {
+      const counts = await storage.getOrderCountsBySource();
+      res.json(counts);
+    } catch (error) {
+      console.error('Error getting order counts:', error);
+      res.status(500).json({ error: 'Failed to get order counts' });
     }
   });
 

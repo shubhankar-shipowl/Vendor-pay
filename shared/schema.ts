@@ -74,7 +74,8 @@ export const orders = mysqlTable("orders", {
   hsn: varchar("hsn", { length: 50 }),
   fileId: varchar("file_id", { length: 36 }).references(() => uploadedFiles.id),
   createdAt: datetime("created_at").default(sql`CURRENT_TIMESTAMP`),
-  previousStatus: varchar("previous_status", { length: 50 })
+  previousStatus: varchar("previous_status", { length: 50 }),
+  source: varchar("source", { length: 50 }).default("parcelx") // 'parcelx' or 'nimbus'
 });
 
 export const reconciliationLog = mysqlTable("reconciliation_log", {

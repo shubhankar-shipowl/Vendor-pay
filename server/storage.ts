@@ -37,6 +37,9 @@ export interface IStorage {
   getOrdersByFileId(fileId: string): Promise<Order[]>;
   updateOrder(id: string, updates: Partial<Order>): Promise<Order | undefined>;
   clearAllOrders(): Promise<void>;
+  clearOrdersBySource(source: string): Promise<number>;
+  getOrderCountBySource(source: string): Promise<number>;
+  getOrderCountsBySource(): Promise<{ parcelx: number; nimbus: number; total: number }>;
   
   // Reconciliation log methods
   createReconciliationLog(log: InsertReconciliationLog): Promise<ReconciliationLog>;
@@ -242,6 +245,41 @@ export class MemStorage implements IStorage {
 
   async clearAllOrders(): Promise<void> {
     this.orders.clear();
+  }
+
+  async clearOrdersBySource(source: string): Promise<number> {
+    let count = 0;
+    for (const [id, order] of this.orders.entries()) {
+      if ((order as any).source === source) {
+        this.orders.delete(id);
+        count++;
+      }
+    }
+    return count;
+  }
+
+  async getOrderCountBySource(source: string): Promise<number> {
+    let count = 0;
+    for (const order of this.orders.values()) {
+      if ((order as any).source === source || (!source && !(order as any).source)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  async getOrderCountsBySource(): Promise<{ parcelx: number; nimbus: number; total: number }> {
+    let parcelx = 0;
+    let nimbus = 0;
+    for (const order of this.orders.values()) {
+      const src = (order as any).source;
+      if (src === 'nimbus') {
+        nimbus++;
+      } else {
+        parcelx++;
+      }
+    }
+    return { parcelx, nimbus, total: parcelx + nimbus };
   }
 
   // Reconciliation log methods

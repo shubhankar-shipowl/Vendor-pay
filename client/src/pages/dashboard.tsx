@@ -58,7 +58,7 @@ export default function Dashboard() {
   const [datePreset, setDatePreset] = useState<string>('');
   const [dateFrom, setDateFrom] = useState<string>('');
   const [dateTo, setDateTo] = useState<string>('');
-  const [pricingBasis, setPricingBasis] = useState<'deliveredDate' | 'orderDate'>('deliveredDate');
+  const [pricingBasis, setPricingBasis] = useState<'deliveredDate' | 'orderDate' | 'channelOrderDate'>('channelOrderDate');
   const [currency, setCurrency] = useState<string>('INR');
   const [minAmount, setMinAmount] = useState<string>('');
   
@@ -67,7 +67,7 @@ export default function Dashboard() {
     selectedSuppliers: [] as string[],
     dateFrom: '',
     dateTo: '',
-    pricingBasis: 'deliveredDate' as 'deliveredDate' | 'orderDate',
+    pricingBasis: 'channelOrderDate' as 'deliveredDate' | 'orderDate' | 'channelOrderDate',
     currency: 'INR',
     minAmount: ''
   });
@@ -133,7 +133,8 @@ export default function Dashboard() {
     refetchInterval: 30000,
     retry: 3,
     retryDelay: 1000,
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: true, // Refresh when returning to dashboard
+    staleTime: 5000, // Consider data stale after 5 seconds
   });
 
   // Get missing price entries for visibility
@@ -186,8 +187,15 @@ export default function Dashboard() {
         const supplierName = suppliersMap.get(order.supplierId) || order.supplierName;
         if (!supplierName || !['Delivered', 'Completed'].includes(order.status)) return;
         
-        const deliveryDate = order.deliveredDate || order.orderDate || order.channelOrderDate;
-        if (!deliveryDate) return;
+        const deliveryDateValue = order.deliveredDate || order.orderDate || order.channelOrderDate;
+        if (!deliveryDateValue) return;
+        
+        // Validate the date
+        const deliveryDateObj = new Date(deliveryDateValue);
+        if (isNaN(deliveryDateObj.getTime())) return; // Invalid date, skip
+        
+        // Use ISO string for consistent comparison
+        const deliveryDate = deliveryDateObj.toISOString();
         
         const existing = ranges.get(supplierName);
         if (!existing) {
@@ -257,11 +265,24 @@ export default function Dashboard() {
       const supplierName = suppliersMap.get(order.supplierId) || order.supplierName;
       if (!supplierName) return;
 
-      const targetDate = pricingBasis === 'orderDate' ? 
-        new Date(order.orderDate || order.channelOrderDate) : 
-        new Date(order.deliveredDate);
+      // Get the target date value based on pricing basis
+      let targetDateValue;
+      if (pricingBasis === 'channelOrderDate') {
+        targetDateValue = order.channelOrderDate;
+      } else if (pricingBasis === 'orderDate') {
+        targetDateValue = order.orderDate || order.channelOrderDate;
+      } else {
+        targetDateValue = order.deliveredDate;
+      }
       
-      if (!targetDate || targetDate < fromDate || targetDate > toDate) return;
+      // Skip if no date value
+      if (!targetDateValue) return;
+      
+      // Parse and validate the date
+      const targetDate = new Date(targetDateValue);
+      if (isNaN(targetDate.getTime())) return; // Invalid date, skip
+      
+      if (targetDate < fromDate || targetDate > toDate) return;
       if (order.status !== 'Delivered' && order.status !== 'Completed') return;
 
       const deliveredQty = parseInt(String(order.deliveredQty || order.qty || 0));
@@ -339,11 +360,24 @@ export default function Dashboard() {
       const supplierName = suppliersMap.get(order.supplierId) || order.supplierName;
       if (!supplierName || !selectedSuppliers.includes(supplierName)) return;
 
-      const targetDate = pricingBasis === 'orderDate' ? 
-        new Date(order.orderDate || order.channelOrderDate) : 
-        new Date(order.deliveredDate);
+      // Get the target date value based on pricing basis
+      let targetDateValue;
+      if (pricingBasis === 'channelOrderDate') {
+        targetDateValue = order.channelOrderDate;
+      } else if (pricingBasis === 'orderDate') {
+        targetDateValue = order.orderDate || order.channelOrderDate;
+      } else {
+        targetDateValue = order.deliveredDate;
+      }
       
-      if (!targetDate || targetDate < fromDate || targetDate > toDate) return;
+      // Skip if no date value
+      if (!targetDateValue) return;
+      
+      // Parse and validate the date
+      const targetDate = new Date(targetDateValue);
+      if (isNaN(targetDate.getTime())) return; // Invalid date, skip
+      
+      if (targetDate < fromDate || targetDate > toDate) return;
       if (order.status !== 'Delivered' && order.status !== 'Completed') return;
 
       const deliveredQty = parseInt(String(order.deliveredQty || order.qty || 0));
@@ -494,9 +528,26 @@ export default function Dashboard() {
       
       if (!appliedFilters.selectedSuppliers.includes(supplierName)) return false;
 
-      const targetDate = appliedFilters.pricingBasis === 'orderDate' ? 
-        new Date(order.orderDate || order.channelOrderDate) : 
-        new Date(order.deliveredDate);
+      // Get the target date based on pricing basis
+      let targetDateValue;
+      if (appliedFilters.pricingBasis === 'channelOrderDate') {
+        targetDateValue = order.channelOrderDate;
+      } else if (appliedFilters.pricingBasis === 'orderDate') {
+        targetDateValue = order.orderDate || order.channelOrderDate;
+      } else {
+        targetDateValue = order.deliveredDate;
+      }
+      
+      // Skip if no date value
+      if (!targetDateValue) return false;
+      
+      // Parse the date - handle both string and Date object formats
+      const targetDate = new Date(targetDateValue);
+      
+      // Validate the date is valid
+      if (isNaN(targetDate.getTime())) {
+        return false; // Invalid date, skip this order
+      }
       
       return targetDate >= fromDate && targetDate <= toDate;
     }) : [];
@@ -1293,13 +1344,14 @@ export default function Dashboard() {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
               <div>
                 <Label htmlFor="pricingBasis" className="text-sm font-medium text-gray-700">
-                  Pricing Basis
+                  Date Type
                 </Label>
-                <Select value={pricingBasis} onValueChange={(value: 'deliveredDate' | 'orderDate') => setPricingBasis(value)}>
+                <Select value={pricingBasis} onValueChange={(value: 'deliveredDate' | 'orderDate' | 'channelOrderDate') => setPricingBasis(value)}>
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="channelOrderDate">Channel Order Date</SelectItem>
                     <SelectItem value="deliveredDate">Delivered Date</SelectItem>
                     <SelectItem value="orderDate">Order Date</SelectItem>
                   </SelectContent>
@@ -1367,7 +1419,7 @@ export default function Dashboard() {
                 <div className="flex items-center space-x-2 text-green-800">
                   <div className="h-2 w-2 bg-green-600 rounded-full animate-pulse"></div>
                   <span className="text-sm font-medium">
-                    Active Filters: {appliedFilters.selectedSuppliers.length === 1 ? appliedFilters.selectedSuppliers[0] : `${appliedFilters.selectedSuppliers.length} Suppliers`} | {appliedFilters.dateFrom} to {appliedFilters.dateTo} | {appliedFilters.pricingBasis === 'deliveredDate' ? 'Delivered' : 'Order'} Date
+                    Active Filters: {appliedFilters.selectedSuppliers.length === 1 ? appliedFilters.selectedSuppliers[0] : `${appliedFilters.selectedSuppliers.length} Suppliers`} | {appliedFilters.dateFrom} to {appliedFilters.dateTo} | {appliedFilters.pricingBasis === 'channelOrderDate' ? 'Channel Order' : appliedFilters.pricingBasis === 'deliveredDate' ? 'Delivered' : 'Order'} Date
                   </span>
                 </div>
                 {hasUnappliedChanges && (

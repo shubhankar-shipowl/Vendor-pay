@@ -190,15 +190,21 @@ export default function GSTInvoicePage() {
     
     // Find suppliers with orders in the date range based on selected date type
     const suppliersWithOrders = orders.filter((order: any) => {
-      let selectedDate;
+      // Get the target date value based on date type
+      let targetDateValue;
       if (dateType === 'channelOrderDate') {
-        selectedDate = new Date(order.channelOrderDate);
+        targetDateValue = order.channelOrderDate;
       } else if (dateType === 'orderDate') {
-        selectedDate = new Date(order.orderDate || order.channelOrderDate);
+        targetDateValue = order.orderDate || order.channelOrderDate;
       } else {
-        selectedDate = new Date(order.deliveredDate);
+        targetDateValue = order.deliveredDate;
       }
       
+      // Skip if no date value
+      if (!targetDateValue) return false;
+      
+      // Parse and validate the date
+      const selectedDate = new Date(targetDateValue);
       if (isNaN(selectedDate.getTime())) {
         return false; // Invalid date
       }
@@ -576,20 +582,27 @@ export default function GSTInvoicePage() {
       const toDate = new Date(dateTo);
       toDate.setHours(23, 59, 59, 999);
 
-      // Step 1: Filter orders by channel order date range first
+      // Step 1: Filter orders by date range based on selected date type
       const ordersInDateRange = (Array.isArray(orders) ? orders : []).filter((order: any) => {
         if (order.supplierId !== supplier.id) return false;
         
-        let selectedDate;
+        // Get the target date value based on date type
+        let targetDateValue;
         if (dateType === 'channelOrderDate') {
-          selectedDate = new Date(order.channelOrderDate);
+          targetDateValue = order.channelOrderDate;
         } else if (dateType === 'orderDate') {
-          selectedDate = new Date(order.orderDate || order.channelOrderDate);
+          targetDateValue = order.orderDate || order.channelOrderDate;
         } else {
-          selectedDate = new Date(order.deliveredDate);
+          targetDateValue = order.deliveredDate;
         }
         
+        // Skip if no date value
+        if (!targetDateValue) return false;
+        
+        // Parse and validate the date
+        const selectedDate = new Date(targetDateValue);
         if (isNaN(selectedDate.getTime())) return false;
+        
         return selectedDate >= fromDate && selectedDate <= toDate;
       });
       

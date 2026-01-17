@@ -1,8 +1,8 @@
 import { randomUUID } from "crypto";
 import { type User, type InsertUser, type UploadedFile, type InsertUploadedFile, type Supplier, type InsertSupplier, type PriceEntry, type InsertPriceEntry, type Order, type InsertOrder, type ReconciliationLog, type InsertReconciliationLog, type SupplierEmail, type InsertSupplierEmail } from "@shared/schema";
-import { db } from "./db";
+import { db, retryDbOperation } from "./db";
 import { users, uploadedFiles, suppliers, priceEntries, orders, reconciliationLog, supplierEmails } from "@shared/schema";
-import { eq, inArray, or } from "drizzle-orm";
+import { eq, inArray, or, sql } from "drizzle-orm";
 import { IStorage } from "./storage";
 
 export class DrizzleStorage implements IStorage {
@@ -76,7 +76,11 @@ export class DrizzleStorage implements IStorage {
   }
 
   async getAllSuppliers(): Promise<Supplier[]> {
-    return await db.select().from(suppliers);
+    return await retryDbOperation(
+      () => db.select().from(suppliers),
+      3,
+      1000
+    );
   }
 
   async updateSupplierOrderAccount(id: string, orderAccount: string | null): Promise<Supplier | undefined> {
@@ -110,7 +114,11 @@ export class DrizzleStorage implements IStorage {
   }
 
   async getAllPriceEntries(): Promise<PriceEntry[]> {
-    return await db.select().from(priceEntries);
+    return await retryDbOperation(
+      () => db.select().from(priceEntries),
+      3,
+      1000
+    );
   }
 
   async getPriceEntriesBySupplier(supplierId: string): Promise<PriceEntry[]> {
@@ -202,11 +210,58 @@ export class DrizzleStorage implements IStorage {
   }
 
   async getAllOrders(): Promise<Order[]> {
-    return await db.select().from(orders);
+    return await retryDbOperation(
+      () => db.select().from(orders),
+      3,
+      1000
+    );
   }
 
   async clearAllOrders(): Promise<void> {
     await db.delete(orders);
+  }
+
+  async clearOrdersBySource(source: string): Promise<number> {
+    const result = await db.delete(orders).where(eq(orders.source, source));
+    return result[0]?.affectedRows || 0;
+  }
+
+  async getOrderCountBySource(source: string): Promise<number> {
+    const result = await retryDbOperation(
+      () => db.select({ count: sql<number>`COUNT(*)` })
+        .from(orders)
+        .where(eq(orders.source, source)),
+      3,
+      1000
+    );
+    return result[0]?.count || 0;
+  }
+
+  async getOrderCountsBySource(): Promise<{ parcelx: number; nimbus: number; total: number }> {
+    // Use a single efficient SQL query to get all counts
+    const result = await retryDbOperation(
+      () => db.select({
+        source: orders.source,
+        count: sql<number>`COUNT(*)`
+      })
+      .from(orders)
+      .groupBy(orders.source),
+      3,
+      1000
+    );
+
+    let parcelx = 0;
+    let nimbus = 0;
+    
+    for (const row of result) {
+      if (row.source === 'nimbus') {
+        nimbus = Number(row.count);
+      } else {
+        parcelx += Number(row.count); // Include null/parcelx/undefined as parcelx
+      }
+    }
+
+    return { parcelx, nimbus, total: parcelx + nimbus };
   }
 
   async getOrdersByFileId(fileId: string): Promise<Order[]> {

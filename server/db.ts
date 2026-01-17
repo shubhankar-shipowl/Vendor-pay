@@ -24,6 +24,9 @@ if (process.env.DATABASE_URL) {
       waitForConnections: true,
       connectionLimit: 10,
       queueLimit: 0,
+      connectTimeout: 60000, // 60 seconds connection timeout
+      enableKeepAlive: true,
+      keepAliveInitialDelay: 0,
     };
     console.log(`✅ Parsed connection string: ${url.hostname}:${url.port}/${url.pathname.slice(1)}`);
   } else {
@@ -66,6 +69,9 @@ if (process.env.DATABASE_URL) {
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
+    connectTimeout: 60000, // 60 seconds connection timeout
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
   };
   
   console.log(`✅ Using individual environment variables:`);
@@ -78,40 +84,59 @@ if (process.env.DATABASE_URL) {
 // Create MySQL connection pool
 export const pool = mysql.createPool(poolConfig);
 
-// Test connection and log status
-pool.getConnection()
-  .then((connection) => {
-    console.log('✅ Database connection pool created successfully');
-    console.log(`📊 Connection pool configured:`);
-    console.log(`   - Host: ${poolConfig.host}`);
-    console.log(`   - Port: ${poolConfig.port || 3306}`);
-    console.log(`   - Database: ${poolConfig.database}`);
-    console.log(`   - Connection Limit: ${poolConfig.connectionLimit || 10}`);
-    
-    // Test the connection
-    return connection.query('SELECT 1 as test')
-      .then(([rows]) => {
-        console.log('✅ Database connection test successful');
-        connection.release();
-      })
-      .catch((error) => {
-        console.error('❌ Database connection test failed:', error.message);
-        connection.release();
-      });
-  })
-  .catch((error) => {
-    console.error('❌ Database connection failed:', error.message);
-    console.error('   Please check your database credentials and network connectivity');
-  });
+// Test connection with retry logic
+async function testConnectionWithRetry(retries = 3, delay = 2000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const connection = await pool.getConnection();
+      console.log('✅ Database connection pool created successfully');
+      console.log(`📊 Connection pool configured:`);
+      console.log(`   - Host: ${poolConfig.host}`);
+      console.log(`   - Port: ${poolConfig.port || 3306}`);
+      console.log(`   - Database: ${poolConfig.database}`);
+      console.log(`   - Connection Limit: ${poolConfig.connectionLimit || 10}`);
+      
+      // Test the connection
+      await connection.query('SELECT 1 as test');
+      console.log('✅ Database connection test successful');
+      connection.release();
+      return;
+    } catch (error: any) {
+      console.error(`❌ Database connection attempt ${i + 1}/${retries} failed:`, error.message);
+      if (error.code === 'EADDRNOTAVAIL' || error.code === 'ECONNREFUSED') {
+        console.error('   ⚠️  Network connectivity issue detected');
+        if (i < retries - 1) {
+          console.log(`   🔄 Retrying in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          console.error('   ❌ All connection attempts failed');
+          console.error('   Please check:');
+          console.error('   1. Database server is running and accessible');
+          console.error('   2. Network connectivity to database host');
+          console.error('   3. Firewall rules allow connection on port', poolConfig.port || 3306);
+          console.error('   4. Database credentials are correct');
+        }
+      } else {
+        // For other errors, don't retry
+        console.error('   Please check your database credentials and network connectivity');
+        break;
+      }
+    }
+  }
+}
+
+// Test connection asynchronously (don't block startup)
+testConnectionWithRetry().catch((error) => {
+  console.error('❌ Database connection test failed:', error.message);
+});
 
 // Add event listeners for connection pool
 pool.on('connection', (connection) => {
   console.log(`🔗 New database connection established (ID: ${connection.threadId})`);
 });
 
-pool.on('error', (error) => {
-  console.error('❌ Database pool error:', error.message);
-});
+// Note: Pool errors are handled by retryDbOperation helper function
+// Connection errors will be automatically retried with exponential backoff
 
 // Graceful shutdown function to close the pool
 export async function closeDatabasePool(): Promise<void> {
@@ -126,3 +151,32 @@ export async function closeDatabasePool(): Promise<void> {
 
 export const db = drizzle(pool, { schema, mode: 'default' });
 console.log('✅ Drizzle ORM initialized with MySQL schema');
+
+// Helper function to retry database operations on connection errors
+export async function retryDbOperation<T>(
+  operation: () => Promise<T>,
+  retries = 3,
+  delay = 1000
+): Promise<T> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      const isConnectionError = 
+        error.code === 'EADDRNOTAVAIL' ||
+        error.code === 'ECONNREFUSED' ||
+        error.code === 'PROTOCOL_CONNECTION_LOST' ||
+        error.code === 'ECONNRESET' ||
+        error.message?.includes('Connection lost');
+      
+      if (isConnectionError && i < retries - 1) {
+        console.warn(`⚠️  Database connection error (attempt ${i + 1}/${retries}), retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        delay *= 2; // Exponential backoff
+      } else {
+        throw error;
+      }
+    }
+  }
+  throw new Error('All retry attempts failed');
+}

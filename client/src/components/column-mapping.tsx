@@ -6,48 +6,78 @@ import { useToast } from "@/hooks/use-toast";
 import { useMutation } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Table2, Wand2, Info, CheckCircle, MinusCircle, AlertCircle } from "lucide-react";
-import { detectColumnMapping } from "@/lib/csv-parser";
+import { detectColumnMapping, detectNimbusColumnMapping } from "@/lib/csv-parser";
 import { ProcessingProgress } from "./processing-progress";
 
 interface ColumnMappingProps {
   fileData: any;
   onMappingComplete: (mapping: any, processedData: any) => void;
+  source?: 'parcelx' | 'nimbus';
 }
 
-export function ColumnMapping({ fileData, onMappingComplete }: ColumnMappingProps) {
+// Parcel X mapping labels (exact match to Parcel X columns)
+const parcelXRequiredMappings = [
+  { key: 'supplierName', label: 'SupplierName', hint: 'Pickup Warehouse' },
+  { key: 'awbNo', label: 'AWB No', hint: 'WayBill Num' },
+  { key: 'productName', label: 'ProductName', hint: 'Product Name' },
+  { key: 'status', label: 'Status', hint: 'Status' }
+];
+
+const parcelXOptionalMappings = [
+  { key: 'orderAccount', label: 'Order Account', hint: 'Order Account' },
+  { key: 'courier', label: 'Courier', hint: 'Fulfilled By' },
+  { key: 'qty', label: 'Qty', hint: 'Product Qty' },
+  { key: 'channelOrderDate', label: 'Channel Order Date', hint: 'Channel Order Date' },
+  { key: 'orderDate', label: 'Order Date', hint: 'Channel Order Date' },
+  { key: 'deliveredDate', label: 'Delivered Date', hint: 'Delivered Date' },
+  { key: 'rtsDate', label: 'RTS Date', hint: 'RTS Date' },
+  { key: 'currency', label: 'Currency', hint: 'Currency' }
+];
+
+// Nimbus mapping labels
+const nimbusRequiredMappings = [
+  { key: 'supplierName', label: 'Supplier Name', hint: 'Warehouse Name' },
+  { key: 'awbNo', label: 'AWB No', hint: 'AWB Number' },
+  { key: 'productName', label: 'Product Name', hint: 'Product(1)' },
+  { key: 'status', label: 'Status', hint: 'Tracking Status' }
+];
+
+const nimbusOptionalMappings = [
+  { key: 'orderAccount', label: 'Order Account', hint: 'Store Name' },
+  { key: 'courier', label: 'Courier', hint: 'Courier' },
+  { key: 'qty', label: 'Qty', hint: 'Quantity' },
+  { key: 'channelOrderDate', label: 'Channel Order Date', hint: 'Order Date' },
+  { key: 'orderDate', label: 'Order Date', hint: 'Shipment Date' },
+  { key: 'deliveredDate', label: 'Delivered Date', hint: 'Delivery Date' },
+  { key: 'rtsDate', label: 'RTS Date', hint: 'RTO Delivered Date' },
+  { key: 'currency', label: 'Currency', hint: 'Currency' }
+];
+
+export function ColumnMapping({ fileData, onMappingComplete, source = 'parcelx' }: ColumnMappingProps) {
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [isProcessing, setIsProcessing] = useState(false);
-  const [requiredMappings] = useState([
-    { key: 'supplierName', label: 'SupplierName', required: true },
-    { key: 'awbNo', label: 'AWB No', required: true },
-    { key: 'productName', label: 'ProductName', required: true },
-    { key: 'status', label: 'Status', required: true }
-  ]);
   
-  const [optionalMappings] = useState([
-    { key: 'orderAccount', label: 'Order Account', required: false },
-    { key: 'courier', label: 'Courier', required: false },
-    { key: 'qty', label: 'Qty', required: false },
-    { key: 'channelOrderDate', label: 'Channel Order Date', required: false },
-    { key: 'orderDate', label: 'Order Date', required: false },
-    { key: 'deliveredDate', label: 'Delivered Date', required: false },
-    { key: 'currency', label: 'Currency', required: false }
-  ]);
+  // Select mappings based on source
+  const requiredMappings = source === 'nimbus' ? nimbusRequiredMappings : parcelXRequiredMappings;
+  const optionalMappings = source === 'nimbus' ? nimbusOptionalMappings : parcelXOptionalMappings;
 
   const { toast } = useToast();
 
   useEffect(() => {
     if (fileData?.headers) {
-      const autoMapping = detectColumnMapping(fileData.headers);
+      // Use source-specific mapping detection
+      const autoMapping = source === 'nimbus' 
+        ? detectNimbusColumnMapping(fileData.headers)
+        : detectColumnMapping(fileData.headers);
       setMapping(autoMapping);
     }
-  }, [fileData]);
+  }, [fileData, source]);
 
   const saveMappingMutation = useMutation({
     mutationFn: async (mappingData: any) => {
       return await apiRequest(`/api/files/${fileData.fileId}/mapping`, {
         method: 'POST',
-        body: JSON.stringify(mappingData)
+        body: JSON.stringify({ ...mappingData, source })
       });
     }
   });
@@ -57,28 +87,23 @@ export function ColumnMapping({ fileData, onMappingComplete }: ColumnMappingProp
       setIsProcessing(true);
       const response = await apiRequest(`/api/files/${fileData.fileId}/process`, {
         method: 'POST',
-        body: JSON.stringify({})
+        body: JSON.stringify({ source })
       });
-      // Processing started successfully - keep isProcessing true so progress component shows
       return response;
     },
     onSuccess: (data) => {
       // Processing started - keep isProcessing true, progress component will handle completion
-      // The progress component will set isProcessing to false when done
     },
     onError: (error: any) => {
       setIsProcessing(false);
       
-      // Handle specific error cases with better messaging
       let title = "Processing failed";
       let description = "There was an error processing your data. Please try again.";
       
-      // Check if it's a file session expired error (410 status)
       if (error?.status === 410 || error?.message?.includes("session expired") || error?.message?.includes("reupload")) {
         title = "File Session Expired";
         description = "Your uploaded file is no longer available due to server restart. Please re-upload your file and process it immediately.";
       } else if (error?.message) {
-        // Use the specific error message from the server
         description = error.message;
       }
       
@@ -100,11 +125,13 @@ export function ColumnMapping({ fileData, onMappingComplete }: ColumnMappingProp
 
   const autoMapColumns = () => {
     if (fileData?.headers) {
-      const autoMapping = detectColumnMapping(fileData.headers);
+      const autoMapping = source === 'nimbus'
+        ? detectNimbusColumnMapping(fileData.headers)
+        : detectColumnMapping(fileData.headers);
       setMapping(autoMapping);
       toast({
         title: "Auto-mapping applied",
-        description: "Column mappings have been automatically detected"
+        description: `Column mappings have been automatically detected for ${source === 'nimbus' ? 'Nimbus' : 'Parcel X'}`
       });
     }
   };
@@ -117,8 +144,7 @@ export function ColumnMapping({ fileData, onMappingComplete }: ColumnMappingProp
     });
   };
 
-  const processMapping = async () => {
-    // Validate required mappings
+  const processMapping = () => {
     const missingRequired = requiredMappings.filter(field => !mapping[field.key]);
     if (missingRequired.length > 0) {
       toast({
@@ -129,21 +155,28 @@ export function ColumnMapping({ fileData, onMappingComplete }: ColumnMappingProp
       return;
     }
 
-    // Save mapping first
-    await saveMappingMutation.mutateAsync(mapping);
-    
-    // Then process data
+    // Start saving mapping immediately (non-blocking)
+    saveMappingMutation.mutate(mapping, {
+      onSuccess: () => {
+        // Then process data after mapping is saved
     processDataMutation.mutate();
+      },
+      onError: (error: any) => {
+        toast({
+          title: "Failed to save mapping",
+          description: error?.message || "Could not save column mapping",
+          variant: "destructive"
+        });
+      }
+    });
   };
 
   const getMappingStatus = (field: any) => {
     const isMapped = !!mapping[field.key];
-    if (field.required && isMapped) {
-      return <CheckCircle className="h-4 w-4 text-success" />;
-    } else if (field.required && !isMapped) {
-      return <AlertCircle className="h-4 w-4 text-error" />;
-    } else if (!field.required && isMapped) {
-      return <CheckCircle className="h-4 w-4 text-success" />;
+    if (isMapped) {
+      return <CheckCircle className="h-4 w-4 text-green-500" />;
+    } else if (requiredMappings.some(r => r.key === field.key)) {
+      return <AlertCircle className="h-4 w-4 text-red-500" />;
     } else {
       return <MinusCircle className="h-4 w-4 text-gray-400" />;
     }
@@ -157,14 +190,13 @@ export function ColumnMapping({ fileData, onMappingComplete }: ColumnMappingProp
     if (success) {
       toast({
         title: "Processing Complete",
-        description: "Your data has been successfully processed and is now available in the dashboard.",
+        description: `Your ${source === 'nimbus' ? 'Nimbus' : 'Parcel X'} data has been successfully processed.`,
       });
-      onMappingComplete(mapping, { success: true });
+      onMappingComplete(mapping, { success: true, source });
     } else {
       let title = "Processing Failed";
       let description = errorMessage || "There was an error processing your data. Please try again.";
       
-      // Handle specific error cases
       if (errorMessage?.includes("session expired") || errorMessage?.includes("reupload")) {
         title = "File Session Expired";
         description = "Your uploaded file is no longer available due to server restart. Please re-upload your file and process it immediately.";
@@ -187,7 +219,6 @@ export function ColumnMapping({ fileData, onMappingComplete }: ColumnMappingProp
     });
   };
 
-  // Show progress component when processing
   if (isProcessing) {
     return (
       <ProcessingProgress
@@ -198,12 +229,18 @@ export function ColumnMapping({ fileData, onMappingComplete }: ColumnMappingProp
     );
   }
 
+  const sourceColor = source === 'nimbus' ? 'cyan' : 'orange';
+  const sourceName = source === 'nimbus' ? 'Nimbus' : 'Parcel X';
+
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8">
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center space-x-3">
-          <Table2 className="text-primary text-xl" />
+          <Table2 className={`text-${sourceColor}-600 text-xl`} />
           <h2 className="text-xl font-semibold text-gray-900">Column Mapping</h2>
+          <Badge variant="outline" className={`bg-${sourceColor}-50 text-${sourceColor}-700 border-${sourceColor}-200`}>
+            {sourceName}
+          </Badge>
         </div>
         <Button
           variant="outline"
@@ -215,20 +252,35 @@ export function ColumnMapping({ fileData, onMappingComplete }: ColumnMappingProp
         </Button>
       </div>
 
+      {/* Column Mapping Reference */}
+      <div className={`bg-${sourceColor}-50 border border-${sourceColor}-200 rounded-lg p-4 mb-6`}>
+        <h4 className={`font-medium text-${sourceColor}-800 mb-2`}>Expected {sourceName} Columns:</h4>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+          {requiredMappings.map(m => (
+            <div key={m.key} className={`text-${sourceColor}-700`}>
+              <span className="font-medium">{m.label}:</span> {m.hint}
+            </div>
+          ))}
+        </div>
+      </div>
+
       {/* Mapping Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Required Mappings */}
         <div className="space-y-4">
           <h3 className="font-medium text-gray-900 flex items-center">
-            <AlertCircle className="h-4 w-4 text-error mr-2" />
+            <AlertCircle className="h-4 w-4 text-red-500 mr-2" />
             Required Mappings
           </h3>
           
           {requiredMappings.map((field) => (
             <div key={field.key} className="flex items-center space-x-3" data-testid={`mapping-${field.key}`}>
-              <label className="w-32 text-sm font-medium text-gray-700">
+              <div className="w-36">
+                <label className="text-sm font-medium text-gray-700 block">
                 {field.label}
               </label>
+                <span className="text-xs text-gray-500">{field.hint}</span>
+              </div>
               <Select
                 value={mapping[field.key] || "none"}
                 onValueChange={(value) => handleMappingChange(field.key, value)}
@@ -256,9 +308,12 @@ export function ColumnMapping({ fileData, onMappingComplete }: ColumnMappingProp
           
           {optionalMappings.map((field) => (
             <div key={field.key} className="flex items-center space-x-3" data-testid={`mapping-${field.key}`}>
-              <label className="w-32 text-sm font-medium text-gray-700">
+              <div className="w-36">
+                <label className="text-sm font-medium text-gray-700 block">
                 {field.label}
               </label>
+                <span className="text-xs text-gray-500">{field.hint}</span>
+              </div>
               <Select
                 value={mapping[field.key] || "none"}
                 onValueChange={(value) => handleMappingChange(field.key, value)}
@@ -284,31 +339,38 @@ export function ColumnMapping({ fileData, onMappingComplete }: ColumnMappingProp
       {/* Mapping Actions */}
       <div className="mt-6 flex items-center justify-between">
         <div className="flex items-center space-x-2 text-sm text-gray-600">
-          <Info className="h-4 w-4 text-primary" />
+          <Info className="h-4 w-4 text-blue-500" />
           <span data-testid="text-mapping-status">
-            {requiredMappedCount} required mappings completed
+            {requiredMappedCount}/{requiredMappings.length} required mappings completed
           </span>
         </div>
         <div className="flex space-x-3">
           <Button 
             variant="outline" 
             onClick={resetMapping}
+            disabled={saveMappingMutation.isPending || processDataMutation.isPending || isProcessing}
             data-testid="button-reset-mapping"
           >
             Reset
           </Button>
           <Button 
             onClick={processMapping}
-            disabled={!isProcessingReady || processDataMutation.isPending || isProcessing}
+            disabled={!isProcessingReady || saveMappingMutation.isPending || processDataMutation.isPending || isProcessing}
+            className={source === 'nimbus' ? 'bg-cyan-600 hover:bg-cyan-700' : 'bg-orange-600 hover:bg-orange-700'}
             data-testid="button-process-data"
           >
-            {processDataMutation.isPending || isProcessing ? (
+            {saveMappingMutation.isPending ? (
+              <div className="flex items-center space-x-2">
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                <span>Saving...</span>
+              </div>
+            ) : processDataMutation.isPending || isProcessing ? (
               <div className="flex items-center space-x-2">
                 <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
                 <span>Starting...</span>
               </div>
             ) : (
-              "Process Data"
+              `Process ${sourceName} Data`
             )}
           </Button>
         </div>
