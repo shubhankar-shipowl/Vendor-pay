@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -80,8 +80,22 @@ export default function Dashboard() {
   const [isSendEmailModalOpen, setIsSendEmailModalOpen] = useState(false);
   const queryClient = useQueryClient();
   const { user, refetch } = useAuth();
-  const [, setLocation] = useLocation();
+  const [location, setLocation] = useLocation();
   const { toast } = useToast();
+  
+  // Auto-refresh dashboard data when navigating to this page
+  useEffect(() => {
+    // Check if we're on the dashboard route
+    if (location === '/' || location === '/dashboard') {
+      // Force refetch all queries when dashboard mounts
+      queryClient.refetchQueries({ queryKey: ['/api/orders'] });
+      queryClient.refetchQueries({ queryKey: ['/api/orders/count-by-source'] });
+      queryClient.refetchQueries({ queryKey: ['/api/dashboard/stats'] });
+      queryClient.refetchQueries({ queryKey: ['/api/suppliers'] });
+      queryClient.refetchQueries({ queryKey: ['/api/price-entries'] });
+      queryClient.refetchQueries({ queryKey: ['/api/missing-price-entries'] });
+    }
+  }, [location, queryClient]);
 
   // Handle logout
   const handleLogout = async () => {
@@ -116,6 +130,7 @@ export default function Dashboard() {
     queryKey: ['/api/orders'],
     retry: 3,
     retryDelay: 1000,
+    refetchOnMount: true, // Always refetch when component mounts
     refetchOnWindowFocus: true, // Refresh when window regains focus
     staleTime: 30000, // Consider data stale after 30 seconds
     refetchInterval: 60000, // Auto-refetch every 60 seconds
@@ -135,6 +150,7 @@ export default function Dashboard() {
     refetchInterval: 30000,
     retry: 3,
     retryDelay: 1000,
+    refetchOnMount: true, // Always refetch when component mounts
     refetchOnWindowFocus: true, // Refresh when returning to dashboard
     staleTime: 5000, // Consider data stale after 5 seconds
   });
