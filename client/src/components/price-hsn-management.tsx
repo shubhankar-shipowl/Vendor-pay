@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,8 +33,9 @@ export function PriceHSNManagement({ onSetupComplete }: PriceHSNManagementProps)
   const [showPriceModal, setShowPriceModal] = useState(false);
   const [showBulkImportModal, setShowBulkImportModal] = useState(false);
   const [showBulkAddModal, setShowBulkAddModal] = useState(false);
+  const [modalKey, setModalKey] = useState(0); // Key to force modal refresh
   const [editingEntry, setEditingEntry] = useState<any>(null);
-  const [bulkPrices, setBulkPrices] = useState<{[key: string]: { price: string, hsn: string, gstRate?: string }}>({});
+  const [bulkPrices, setBulkPrices] = useState<{[key: string]: { price: string, priceAfterGst?: string, hsn: string, gstRate?: string }}>({});
   const [selectedBulkFile, setSelectedBulkFile] = useState<File | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   
@@ -86,13 +87,33 @@ export function PriceHSNManagement({ onSetupComplete }: PriceHSNManagementProps)
   });
 
   // Fetch missing price entries (vendor-product combinations needing prices)
-  const { data: missingPriceEntries = [] } = useQuery({
+  const { data: missingPriceEntries = [], refetch: refetchMissingEntries } = useQuery({
     queryKey: ['/api/missing-price-entries'],
     queryFn: async () => {
-      const response = await fetch('/api/missing-price-entries');
-      return response.json(); // Keep .json() for fetch calls
-    }
+      // Add cache busting to ensure fresh data
+      const response = await fetch(`/api/missing-price-entries?t=${Date.now()}`, {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache'
+        }
+      });
+      const data = await response.json();
+      console.log('Fetched missing price entries:', data.length);
+      return data;
+    },
+    refetchOnWindowFocus: true, // Refetch when window regains focus
+    staleTime: 0 // Always consider data stale to ensure fresh data
   });
+
+  // Refetch missing entries when modal opens to ensure fresh data
+  useEffect(() => {
+    if (showBulkAddModal) {
+      console.log('Modal opened, refetching missing entries...');
+      refetchMissingEntries().then((result) => {
+        console.log('Refetch completed, new data:', result.data?.length || 'unknown');
+      });
+    }
+  }, [showBulkAddModal, refetchMissingEntries]);
 
   // Filter missing price entries based on search and order count filters
   const filteredMissingEntries = missingPriceEntries.filter((entry: any) => {
@@ -117,7 +138,10 @@ export function PriceHSNManagement({ onSetupComplete }: PriceHSNManagementProps)
         effectiveTo: data.effectiveTo && data.effectiveTo.trim() ? new Date(data.effectiveTo) : null,
       };
       
-      return await apiRequest('POST', '/api/price-entries', processedData);
+      return await apiRequest('/api/price-entries', {
+        method: 'POST',
+        body: JSON.stringify(processedData),
+      });
     },
     onSuccess: () => {
       toast({
@@ -337,76 +361,273 @@ export function PriceHSNManagement({ onSetupComplete }: PriceHSNManagementProps)
     });
   };
 
-  // Handle bulk price updates
-  const updateBulkPrice = (productKey: string, field: 'price' | 'hsn' | 'gstRate', value: string) => {
-    setBulkPrices(prev => ({
-      ...prev,
-      [productKey]: {
-        ...prev[productKey],
-        [field]: value
+  // Handle bulk price updates with bidirectional calculation
+  const updateBulkPrice = (productKey: string, field: 'price' | 'priceAfterGst' | 'hsn' | 'gstRate', value: string) => {
+    setBulkPrices(prev => {
+      const currentData = prev[productKey] || { price: '', priceAfterGst: '', hsn: '', gstRate: '' };
+      const updatedData: any = { ...currentData, [field]: value };
+      
+      // Bidirectional calculation
+      const gstRate = parseFloat(updatedData.gstRate || '0') || 0;
+      
+      if (field === 'price' && gstRate > 0) {
+        // User entered Price Before GST - calculate Price After GST
+        const priceBeforeGst = parseFloat(value) || 0;
+        if (priceBeforeGst > 0) {
+          updatedData.priceAfterGst = (priceBeforeGst * (1 + gstRate / 100)).toFixed(2);
+        } else {
+          updatedData.priceAfterGst = '';
+        }
+      } else if (field === 'priceAfterGst') {
+        // User entered Price After GST
+        const priceAfterGst = parseFloat(value) || 0;
+        if (priceAfterGst > 0 && gstRate > 0) {
+          // If GST Rate is provided, calculate Price Before GST
+          updatedData.price = (priceAfterGst / (1 + gstRate / 100)).toFixed(2);
+        } else {
+          // If GST Rate is not provided, clear Price Before GST (user can enter Price After GST alone)
+          updatedData.price = '';
+        }
+      } else if (field === 'gstRate' && gstRate > 0) {
+        // User changed GST Rate - recalculate based on which field has value
+        const priceBeforeGst = parseFloat(updatedData.price) || 0;
+        const priceAfterGst = parseFloat(updatedData.priceAfterGst || '0') || 0;
+        
+        if (priceBeforeGst > 0) {
+          // If Price Before GST exists, calculate Price After GST
+          updatedData.priceAfterGst = (priceBeforeGst * (1 + gstRate / 100)).toFixed(2);
+        } else if (priceAfterGst > 0) {
+          // If Price After GST exists, calculate Price Before GST
+          updatedData.price = (priceAfterGst / (1 + gstRate / 100)).toFixed(2);
+        }
       }
-    }));
+      
+      return {
+        ...prev,
+        [productKey]: updatedData
+      };
+    });
   };
 
   const saveBulkPrices = async () => {
-    const entries = Object.entries(bulkPrices).filter(([_, data]) => 
-      data.price && parseFloat(data.price) > 0 && data.hsn?.trim() && data.gstRate
-    );
+    const entries = Object.entries(bulkPrices).filter(([_, data]) => {
+      // Check if either price or priceAfterGst is filled
+      const hasPrice = (data.price && parseFloat(data.price) > 0) || 
+                       (data.priceAfterGst && parseFloat(data.priceAfterGst) > 0);
+      // If Price After GST is entered, GST Rate and Price Before GST are optional
+      // If Price Before GST is entered, GST Rate is required
+      if (data.priceAfterGst && parseFloat(data.priceAfterGst) > 0) {
+        return true; // Price After GST alone is sufficient
+      }
+      return hasPrice && data.gstRate; // Price Before GST requires GST Rate
+    });
 
     if (entries.length === 0) {
       toast({
         title: "No entries to save",
-        description: "Please fill price and HSN for at least one product",
+        description: "Please fill at least Price After GST (or Price Before GST with GST Rate) for at least one product",
         variant: "destructive"
       });
       return;
     }
 
+    // Collect all mutation promises (declared outside try block for catch block access)
+    const mutationPromises: Promise<any>[] = [];
+
     try {
+      
       for (const [productKey, data] of entries) {
         const entry = missingPriceEntries.find((e: any) => 
           `${e.supplierName}_${e.productName}` === productKey
         );
         
         if (entry) {
-          const supplierMatch = suppliers.find((s: any) => s.name === entry.supplierName);
-          const finalPrice = parseFloat(data.price);
-          const gstRate = parseFloat(data.gstRate) || 18.0;
-          const priceBeforeGst = finalPrice / (1 + gstRate/100);
+          // Use supplierId from entry if available, otherwise find by name
+          let supplierId = entry.supplierId;
           
-          const formattedData = {
-            supplierId: supplierMatch?.id || '',
-            productName: entry.productName,
+          if (!supplierId && entry.supplierName) {
+            // Try to find supplier by name (case-insensitive, trimmed)
+            const supplierMatch = suppliers.find((s: any) => 
+              s.name?.trim().toLowerCase() === entry.supplierName?.trim().toLowerCase()
+            );
+            supplierId = supplierMatch?.id;
+          }
+          
+          // Skip if we still don't have a supplierId
+          if (!supplierId) {
+            console.warn(`Could not find supplier for: ${entry.supplierName}`);
+            toast({
+              title: "Warning",
+              description: `Could not find supplier "${entry.supplierName}". Please ensure the supplier exists.`,
+              variant: "destructive"
+            });
+            continue;
+          }
+          
+          // Determine which price field was entered and calculate the other
+          let priceBeforeGst: number;
+          let priceAfterGst: number;
+          let gstRate: number;
+          
+          if (data.priceAfterGst && parseFloat(data.priceAfterGst) > 0) {
+            // User entered Price After GST - GST Rate and Price Before GST are optional
+            priceAfterGst = parseFloat(data.priceAfterGst);
+            gstRate = data.gstRate ? parseFloat(data.gstRate) : 0;
+            
+            if (gstRate > 0) {
+              // If GST Rate is provided, calculate Price Before GST
+              priceBeforeGst = priceAfterGst / (1 + gstRate / 100);
+            } else {
+              // If GST Rate is not provided, use Price After GST as Price Before GST
+              priceBeforeGst = priceAfterGst;
+              gstRate = 0;
+            }
+          } else if (data.price && parseFloat(data.price) > 0) {
+            // User entered Price Before GST - GST Rate is required
+            priceBeforeGst = parseFloat(data.price);
+            gstRate = parseFloat(data.gstRate) || 18.0;
+            priceAfterGst = priceBeforeGst * (1 + gstRate / 100);
+          } else {
+            // Should not happen due to filter, but handle gracefully
+            continue;
+          }
+          
+          // Format decimal fields as strings (required by Zod schema for MySQL decimal types)
+          // Dates should be ISO strings (full ISO format, not just date part)
+          const formattedData: any = {
+            supplierId: supplierId,
+            productName: entry.productName.trim(), // Ensure no leading/trailing whitespace
             currency: 'INR',
-            price: finalPrice,
-            priceBeforeGst: parseFloat(priceBeforeGst.toFixed(2)),
-            gstRate: gstRate,
-            hsn: data.hsn.trim(),
-            effectiveFrom: new Date().toISOString().split('T')[0],
-            effectiveTo: ''
+            price: priceAfterGst.toFixed(2), // Save as Price After GST (string for decimal)
+            priceBeforeGst: priceBeforeGst.toFixed(2), // Save as Price Before GST (string for decimal)
+            gstRate: gstRate.toFixed(2), // GST Rate as string for decimal
+            hsn: data.hsn?.trim() || '', // HSN is optional, use empty string if not provided
+            effectiveFrom: new Date().toISOString(), // Full ISO string for datetime
           };
+          
+          // Only include effectiveTo if it has a value
+          if (data.effectiveTo && data.effectiveTo.trim()) {
+            formattedData.effectiveTo = new Date(data.effectiveTo).toISOString();
+          }
 
-          await createPriceEntryMutation.mutateAsync(formattedData);
+          console.log('Saving price entry:', {
+            supplierId,
+            supplierName: entry.supplierName,
+            productName: formattedData.productName,
+            priceAfterGst: formattedData.price,
+            priceBeforeGst: formattedData.priceBeforeGst,
+            gstRate: formattedData.gstRate
+          });
+
+          // Use apiRequest directly instead of mutation to avoid onSuccess callback interference
+          mutationPromises.push(
+            apiRequest('/api/price-entries', {
+              method: 'POST',
+              body: JSON.stringify(formattedData),
+            }).catch((error: any) => {
+              console.error('Failed to save price entry:', {
+                supplierId,
+                supplierName: entry.supplierName,
+                productName: formattedData.productName,
+                error: error?.message || error || 'Unknown error',
+                formattedData
+              });
+              throw error; // Re-throw to be caught by Promise.allSettled
+            })
+          );
         }
       }
 
-      toast({
-        title: "Bulk prices saved",
-        description: `Successfully added ${entries.length} price entries`
+      // Wait for all mutations to complete
+      const results = await Promise.allSettled(mutationPromises);
+      
+      // Count successful saves and log failures
+      const successfulSaves = results.filter(r => r.status === 'fulfilled').length;
+      const failedSaves = results.filter(r => r.status === 'rejected');
+      
+      // Log failed saves for debugging
+      failedSaves.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          console.error(`Failed save ${index + 1}:`, result.reason);
+        }
       });
+      
+      if (successfulSaves > 0) {
+        console.log(`Successfully saved ${successfulSaves} price entries`);
+        toast({
+          title: "Bulk prices saved",
+          description: `Successfully added ${successfulSaves} price entries${failedSaves.length > 0 ? ` (${failedSaves.length} failed)` : ''}`
+        });
+      } else {
+        console.error('No price entries were saved. All saves failed.');
+        toast({
+          title: "Failed to save prices",
+          description: "No price entries were saved. Please check the browser console for errors.",
+          variant: "destructive"
+        });
+        return; // Don't close modal or clear data if nothing was saved
+      }
       
       setBulkPrices({});
-      setShowBulkAddModal(false);
-      queryClient.invalidateQueries({ queryKey: ['/api/price-entries'] });
-      queryClient.invalidateQueries({ queryKey: ['/api/missing-price-entries'] });
       
-    } catch (error) {
-      console.error('Bulk save error:', error);
-      toast({
-        title: "Error saving prices",
-        description: "Some entries might not have been saved. Please try again.",
-        variant: "destructive"
+      // Close modal first to trigger cleanup
+      setShowBulkAddModal(false);
+      
+      // Add a delay to ensure database consistency
+      console.log('Waiting for database consistency...');
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      
+      // Invalidate and remove from cache completely
+      console.log('Invalidating and removing query caches...');
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['/api/price-entries'] }),
+        queryClient.invalidateQueries({ queryKey: ['/api/missing-price-entries'] }),
+        queryClient.removeQueries({ queryKey: ['/api/missing-price-entries'] }) // Force remove from cache
+      ]);
+      
+      // Explicitly refetch missing price entries to ensure fresh data
+      console.log('Refetching missing price entries...');
+      const refetchResult = await queryClient.refetchQueries({ 
+        queryKey: ['/api/missing-price-entries'],
+        type: 'active' // Only refetch active queries
       });
+      console.log('Refetch completed. New missing entries count:', refetchResult[0]?.data?.length || 'unknown');
+      
+      // Force modal refresh on next open
+      setModalKey(prev => prev + 1);
+      
+    } catch (error: any) {
+      console.error('Bulk save error:', error);
+      
+      // Check if we had any successful saves before the error
+      let successfulSaves = 0;
+      if (mutationPromises.length > 0) {
+        try {
+          const results = await Promise.allSettled(mutationPromises);
+          successfulSaves = results.filter((r: any) => r?.status === 'fulfilled').length;
+        } catch (promiseError) {
+          console.error('Error checking promise results:', promiseError);
+        }
+      }
+      
+      if (successfulSaves > 0) {
+        toast({
+          title: "Partial success",
+          description: `${successfulSaves} entries saved, but some failed. Check console for details.`,
+          variant: "default"
+        });
+        // Still proceed with cache invalidation if some saves succeeded
+        setBulkPrices({});
+        setShowBulkAddModal(false);
+        await queryClient.invalidateQueries({ queryKey: ['/api/missing-price-entries'] });
+        await queryClient.refetchQueries({ queryKey: ['/api/missing-price-entries'] });
+      } else {
+        toast({
+          title: "Error saving prices",
+          description: error?.message || "Failed to save prices. Please check the browser console for details.",
+          variant: "destructive"
+        });
+      }
     }
   };
 
@@ -1426,7 +1647,7 @@ export function PriceHSNManagement({ onSetupComplete }: PriceHSNManagementProps)
       </Dialog>
 
       {/* Bulk Add Modal */}
-      <Dialog open={showBulkAddModal} onOpenChange={setShowBulkAddModal}>
+      <Dialog key={modalKey} open={showBulkAddModal} onOpenChange={setShowBulkAddModal}>
         <DialogContent className="max-w-4xl max-h-[80vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center space-x-2">
@@ -1562,13 +1783,14 @@ export function PriceHSNManagement({ onSetupComplete }: PriceHSNManagementProps)
                     <TableHead className="min-w-[70px] text-center">Orders</TableHead>
                     <TableHead className="min-w-[110px]">Price Before GST</TableHead>
                     <TableHead className="min-w-[80px]">GST Rate (%)</TableHead>
+                    <TableHead className="min-w-[120px]">Price After GST (INR)</TableHead>
                     <TableHead className="min-w-[100px]">HSN Code</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {filteredMissingEntries.map((entry: any, index: number) => {
                     const productKey = `${entry.supplierName}_${entry.productName}`;
-                    const currentData = bulkPrices[productKey] || { price: '', hsn: '', gstRate: '' };
+                    const currentData = bulkPrices[productKey] || { price: '', priceAfterGst: '', hsn: '', gstRate: '' };
                     
                     return (
                       <TableRow key={index} className="hover:bg-gray-50">
@@ -1602,11 +1824,22 @@ export function PriceHSNManagement({ onSetupComplete }: PriceHSNManagementProps)
                             type="number"
                             placeholder="GST %"
                             value={currentData.gstRate || ''}
-                            onChange={(e) => updateBulkPrice(productKey, 'gstRate' as any, e.target.value)}
+                            onChange={(e) => updateBulkPrice(productKey, 'gstRate', e.target.value)}
                             className="w-full"
                             min="0"
                             max="100"
                             step="0.1"
+                          />
+                        </TableCell>
+                        <TableCell>
+                          <Input
+                            type="number"
+                            placeholder="Price after GST"
+                            value={currentData.priceAfterGst || ''}
+                            onChange={(e) => updateBulkPrice(productKey, 'priceAfterGst', e.target.value)}
+                            className="w-full bg-green-50 border-green-200"
+                            min="0"
+                            step="0.01"
                           />
                         </TableCell>
                         <TableCell>
@@ -1627,9 +1860,16 @@ export function PriceHSNManagement({ onSetupComplete }: PriceHSNManagementProps)
 
             <div className="flex justify-between items-center bg-gray-50 p-4 rounded-lg">
               <div className="text-sm text-gray-600">
-                {Object.entries(bulkPrices).filter(([_, data]) => 
-                  data.price && parseFloat(data.price) > 0 && data.hsn?.trim() && data.gstRate
-                ).length} products ready to save
+                {Object.entries(bulkPrices).filter(([_, data]) => {
+                  const hasPrice = (data.price && parseFloat(data.price) > 0) || 
+                                   (data.priceAfterGst && parseFloat(data.priceAfterGst) > 0);
+                  // If Price After GST is entered, it's sufficient alone
+                  // If Price Before GST is entered, GST Rate is required
+                  if (data.priceAfterGst && parseFloat(data.priceAfterGst) > 0) {
+                    return true; // Price After GST alone is sufficient
+                  }
+                  return hasPrice && data.gstRate; // Price Before GST requires GST Rate
+                }).length} products ready to save
               </div>
               <div className="flex space-x-3">
                 <Button 

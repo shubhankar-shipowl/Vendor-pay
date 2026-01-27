@@ -1573,8 +1573,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       console.log('Received price entry data:', req.body);
 
+      // Convert date strings to Date objects before validation
+      // (Zod schema expects Date objects for datetime fields)
+      const requestData = { ...req.body };
+      if (requestData.effectiveFrom && typeof requestData.effectiveFrom === 'string') {
+        requestData.effectiveFrom = new Date(requestData.effectiveFrom);
+      }
+      if (requestData.effectiveTo && typeof requestData.effectiveTo === 'string') {
+        requestData.effectiveTo = new Date(requestData.effectiveTo);
+      }
+
       // Validate the request body
-      const validationResult = insertPriceEntrySchema.safeParse(req.body);
+      const validationResult = insertPriceEntrySchema.safeParse(requestData);
 
       if (!validationResult.success) {
         console.error('Validation failed:', validationResult.error.errors);
@@ -1586,16 +1596,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const priceEntryData = validationResult.data;
 
+      // Normalize product name (trim whitespace) for consistent matching
+      if (priceEntryData.productName) {
+        priceEntryData.productName = priceEntryData.productName.trim();
+      }
+
       // Ensure supplierId exists if provided
       if (priceEntryData.supplierId) {
         const supplier = await storage.getSupplier(priceEntryData.supplierId);
         if (!supplier) {
+          console.error('Invalid supplier ID:', priceEntryData.supplierId);
           return res.status(400).json({ error: 'Invalid supplier ID' });
         }
+        console.log('Supplier verified:', supplier.name, supplier.id);
+      } else {
+        console.warn('No supplierId provided in price entry data');
       }
 
       const priceEntry = await storage.createPriceEntry(priceEntryData);
-      console.log('Price entry created successfully:', priceEntry);
+      console.log('Price entry created successfully:', {
+        id: priceEntry.id,
+        supplierId: priceEntry.supplierId,
+        productName: priceEntry.productName,
+        price: priceEntry.price
+      });
 
       res.json(priceEntry);
     } catch (error) {
@@ -2344,12 +2368,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const priceEntries = await storage.getAllPriceEntries();
       const suppliers = await storage.getAllSuppliers();
 
+      console.log(`Checking missing prices: ${priceEntries.length} existing entries, ${orders.length} orders, ${suppliers.length} suppliers`);
+
       // Create a map of existing price entries
+      // Normalize product names (trim whitespace) for consistent matching
       const existingPrices = new Map();
       priceEntries.forEach((entry) => {
-        const key = `${entry.supplierId}-${entry.productName}`;
-        existingPrices.set(key, true);
+        if (entry.supplierId && entry.productName) {
+          const normalizedProductName = entry.productName.trim();
+          const key = `${entry.supplierId}-${normalizedProductName}`;
+          existingPrices.set(key, true);
+        }
       });
+      
+      console.log(`Created existingPrices map with ${existingPrices.size} entries`);
 
       // Find unique vendor-product combinations from orders
       const combinations = new Map();
@@ -2386,14 +2418,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       // Filter out combinations that already have price entries
+      // Normalize product names for consistent matching
       const missing = [];
+      let matchedCount = 0;
+      
       combinations.forEach((combo, key) => {
         const supplier = suppliers.find((s) => s.name === combo.supplierName);
-        const priceKey = supplier
-          ? `${supplier.id}-${combo.productName}`
-          : null;
+        if (supplier && supplier.id && combo.productName) {
+          const normalizedProductName = combo.productName.trim();
+          const priceKey = `${supplier.id}-${normalizedProductName}`;
 
-        if (!priceKey || !existingPrices.has(priceKey)) {
+          // Check if price entry exists (both keys are normalized)
+          if (!existingPrices.has(priceKey)) {
+            missing.push({
+              ...combo,
+              supplierId: supplier.id,
+              needsPricing: true,
+            });
+          } else {
+            matchedCount++;
+          }
+        } else {
+          // If supplier not found, still include it as missing
           missing.push({
             ...combo,
             supplierId: supplier?.id || null,
@@ -2402,6 +2448,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       });
 
+      console.log(`Missing price entries: ${missing.length} missing, ${matchedCount} already have prices`);
       res.json(missing);
     } catch (error) {
       console.error('Get missing price entries error:', error);
