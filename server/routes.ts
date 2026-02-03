@@ -1791,9 +1791,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 row['PriceBeforeGST'] ||
                 '0',
             );
-            const gstRate = parseFloat(
+            let gstRate = parseFloat(
               row['GST Rate (%)'] || row['gst_rate'] || row['GSTRate'] || '18',
             ); // Default 18%
+            
+            // Fix: If GST Rate is entered as a decimal (e.g., 0.18 for 18%), convert it to percentage
+            if (gstRate > 0 && gstRate <= 1) {
+              gstRate = gstRate * 100;
+            }
+
             const priceAfterGst = parseFloat(
               row['Price After GST (INR)'] ||
                 row['price_after_gst'] ||
