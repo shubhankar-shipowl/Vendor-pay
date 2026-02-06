@@ -351,12 +351,47 @@ export async function sendEmailViaGmailApi(options: {
     throw new Error('Could not determine sender email address');
   }
 
+  // Search for an existing thread with the same subject and recipient to enable threading
+  let existingThreadId: string | undefined;
+  let existingMessageId: string | undefined;
+  try {
+    const query = `subject:"${options.subject}" to:${options.to[0]} in:sent`;
+    const searchResult = await gmail.users.messages.list({
+      userId: 'me',
+      q: query,
+      maxResults: 1,
+    });
+
+    if (searchResult.data.messages && searchResult.data.messages.length > 0) {
+      const lastMsg = searchResult.data.messages[0];
+      existingThreadId = lastMsg.threadId || undefined;
+
+      // Get the Message-ID header from the last message for In-Reply-To/References
+      const msgDetail = await gmail.users.messages.get({
+        userId: 'me',
+        id: lastMsg.id!,
+        format: 'metadata',
+        metadataHeaders: ['Message-ID'],
+      });
+
+      const messageIdHeader = msgDetail.data.payload?.headers?.find(
+        (h: any) => h.name?.toLowerCase() === 'message-id'
+      );
+      if (messageIdHeader?.value) {
+        existingMessageId = messageIdHeader.value;
+      }
+      console.log(`🔗 Found existing thread ${existingThreadId} for "${options.subject}"`);
+    }
+  } catch (searchError: any) {
+    console.log(`⚠️ Thread search failed, sending as new thread: ${searchError.message}`);
+  }
+
   // Build the email message
   const boundary = `boundary_${Date.now().toString(16)}`;
   const hasAttachments = options.attachments && options.attachments.length > 0;
 
   let emailLines: string[] = [];
-  
+
   // Headers
   emailLines.push(`From: ${fromEmail}`);
   emailLines.push(`To: ${options.to.join(', ')}`);
@@ -364,6 +399,13 @@ export async function sendEmailViaGmailApi(options: {
     emailLines.push(`Cc: ${options.cc.join(', ')}`);
   }
   emailLines.push(`Subject: =?UTF-8?B?${Buffer.from(options.subject).toString('base64')}?=`);
+
+  // Add threading headers if replying to an existing thread
+  if (existingMessageId) {
+    emailLines.push(`In-Reply-To: ${existingMessageId}`);
+    emailLines.push(`References: ${existingMessageId}`);
+  }
+
   emailLines.push('MIME-Version: 1.0');
 
   if (hasAttachments) {
@@ -436,12 +478,15 @@ export async function sendEmailViaGmailApi(options: {
     .replace(/\//g, '_')
     .replace(/=+$/, '');
 
-  // Send via Gmail API
+  // Send via Gmail API (include threadId if replying to existing thread)
+  const requestBody: any = { raw: encodedEmail };
+  if (existingThreadId) {
+    requestBody.threadId = existingThreadId;
+  }
+
   const response = await gmail.users.messages.send({
     userId: 'me',
-    requestBody: {
-      raw: encodedEmail,
-    },
+    requestBody,
   });
 
   if (!response.data.id) {
