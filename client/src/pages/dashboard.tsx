@@ -58,7 +58,7 @@ export default function Dashboard() {
   const [datePreset, setDatePreset] = useState<string>('');
   const [dateFrom, setDateFrom] = useState<string>('');
   const [dateTo, setDateTo] = useState<string>('');
-  const [pricingBasis, setPricingBasis] = useState<'deliveredDate' | 'orderDate' | 'channelOrderDate'>('channelOrderDate');
+  const [pricingBasis, setPricingBasis] = useState<'deliveredDate' | 'orderDate' | 'channelOrderDate'>('deliveredDate');
   const [currency, setCurrency] = useState<string>('INR');
   const [minAmount, setMinAmount] = useState<string>('');
   
@@ -67,7 +67,7 @@ export default function Dashboard() {
     selectedSuppliers: [] as string[],
     dateFrom: '',
     dateTo: '',
-    pricingBasis: 'channelOrderDate' as 'deliveredDate' | 'orderDate' | 'channelOrderDate',
+    pricingBasis: 'deliveredDate' as 'deliveredDate' | 'orderDate' | 'channelOrderDate',
     currency: 'INR',
     minAmount: ''
   });
