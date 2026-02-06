@@ -125,7 +125,7 @@ export function SendEmailModal({
       // Subject: use initialSubject if provided, else default payout subject
       const defaultSubject = initialSubject
         ? initialSubject
-        : `Payout Summary - ${payoutSummary.supplier} - ${dateRange}`;
+        : `Payout summary ${payoutSummary.supplier}`;
       setSubject(defaultSubject);
 
       // Content: use initialContent if provided, else generated payout content
