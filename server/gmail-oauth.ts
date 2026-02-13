@@ -393,7 +393,7 @@ export async function sendEmailViaGmailApi(options: {
   let emailLines: string[] = [];
 
   // Headers
-  emailLines.push(`From: ${fromEmail}`);
+  emailLines.push(`From: Shipowl Finance Team <${fromEmail}>`);
   emailLines.push(`To: ${options.to.join(', ')}`);
   if (options.cc && options.cc.length > 0) {
     emailLines.push(`Cc: ${options.cc.join(', ')}`);
