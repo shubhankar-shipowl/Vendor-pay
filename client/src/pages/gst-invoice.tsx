@@ -246,7 +246,7 @@ export default function GSTInvoicePage() {
 
   // Filter suppliers based on search term
   const filteredSuppliers = React.useMemo(() => {
-    const suppliersToShow = dateFrom && dateTo && eligibleSuppliers.length > 0 ? eligibleSuppliers : (Array.isArray(suppliers) ? suppliers : []);
+    const suppliersToShow = dateFrom && dateTo ? eligibleSuppliers : (Array.isArray(suppliers) ? suppliers : []);
     if (!searchTerm) return suppliersToShow;
     
     return suppliersToShow.filter((supplier: any) => 
